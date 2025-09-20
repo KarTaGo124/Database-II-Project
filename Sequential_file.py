@@ -90,3 +90,18 @@ class SequentialFile:
         self.read_count = 0
         self.write_count = 0
 
+        if not os.path.exists(self.main_file):
+            open(self.main_file, 'wb').close()
+        if not os.path.exists(self.aux_file):
+            open(self.aux_file, 'wb').close()
+
+    def reset_counters(self):
+        self.read_count = 0
+        self.write_count = 0
+
+    def get_stats(self):
+        return {
+            "Lecturas": self.read_count,
+            "Escrituras": self.write_count,
+            "Total": self.read_count + self.write_count
+        }
