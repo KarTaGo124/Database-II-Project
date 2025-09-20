@@ -30,20 +30,22 @@ def making_format(list_of_types: List[List[str, str, int]]) -> str:
 def calc_array_format(field_type: str, field_size: int) -> str:
     if field_type == "array[int]":
         pass
-    if field_type == "array[float]":
+    elif field_type == "array[float]":
         pass
-    if field_type == "array[char]":
+    elif field_type == "array[char]":
         pass
-    if field_type == "array[bool]":
+    elif field_type == "array[bool]":
         pass
-    if field_type == "array[str]":
+    elif field_type == "array[str]":
         pass
-    raise ValueError(f"Tipo de array no encontrado, verificar valor ingresado: {field_type}")
+    else:
+        raise ValueError(f"Tipo de array no encontrado, verificar valor ingresado: {field_type}")
 
 
 class Record:
     FORMAT = ""
     RECORD_SIZE = 0
+    key_field = ""
     value_type_size = [] # es una tupla de 3 de (valor, tipo, size) para cada campo
 
     def __init__(self, list_of_types: List[List[str, str, int]]):
@@ -54,7 +56,8 @@ class Record:
     def pack(self) -> bytes:
         procesados = []
         for item in self.value_type_size:
-            procesados.append(procesar_dato(item))
+            valor = getattr(self, item[0])
+            procesados.append(procesar_dato(valor, item[1],item[2]))
         return struct.pack(self.FORMAT, *procesados)
     
     @staticmethod
@@ -78,3 +81,12 @@ def procesar_dato(nombre_tipo_tamano: List[str, str, int]):
     else :
         raise ValueError(f"Tipo no encontrado, verificar valor ingresado: {nombre_tipo_tamano[1]}")
     
+class SequentialFile:
+    def __init__(self, main_file: str, aux_file: str, record_class: Record, k_rec=None):
+        self.main_file = main_file
+        self.aux_file = aux_file
+        self.record_class = record_class
+        self.k = k_rec
+        self.read_count = 0
+        self.write_count = 0
+
