@@ -207,7 +207,40 @@ class SequentialFile:
     def rangeSearch(begin_key, end_key):
         pass
 
-    def remove(key):
-        pass
+    def remove(self, key):
+        with open(self.main_file, 'r+b') as f:
+            i = 0
+            while data := f.read(self.record_class.RECORD_SIZE):
+                self.read_count += 1
+                rec = self.record_class.unpack(data)
+                if rec.get_key() == key:
+                    if rec.active:
+                        rec.active = False
+                        f.seek(i * self.record_class.RECORD_SIZE)
+                        f.write(rec.pack())
+                        self.write_count += 1
+                        return True, f"Registro con clave {key} eliminado en main_file.", rec
+                    else:
+                        return False, f"Error: Registro con clave {key} ya estaba eliminado en main_file.", None
+                i += 1
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'r+b') as f:
+                i = 0
+                while data := f.read(self.record_class.RECORD_SIZE):
+                    self.read_count += 1
+                    rec = self.record_class.unpack(data)
+                    if rec.get_key() == key:
+                        if rec.active:
+                            rec.active = False
+                            f.seek(i * self.record_class.RECORD_SIZE)
+                            f.write(rec.pack())
+                            self.write_count += 1
+                            return True, f"Registro con clave {key} eliminado en aux_file.", rec
+                        else:
+                            return False, f"Error: Registro con clave {key} ya estaba eliminado en aux_file.", rec
+                    i += 1
+
+        return False, f"Error: Registro con clave {key} no existe.", None
 
     
