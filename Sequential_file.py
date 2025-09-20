@@ -64,6 +64,9 @@ class Record:
     def unpack(data):
         fields = struct.unpack(Record.FORMAT, data)
         return Record() # mori falta hacer esto bien
+    
+    def get_key(self):
+        return getattr(self, self.key_field)
 
 def procesar_dato(nombre_tipo_tamano: List[str, str, int]):
     if nombre_tipo_tamano[1] == "int":
@@ -133,4 +136,33 @@ class SequentialFile:
                         records.append(rec)
         
         return records
+    
+    def rebuild(self):
+        records = []
+
+        with open(self.main_file, 'rb') as f:
+            while data := f.read(self.record_class.RECORD_SIZE):
+                self.read_count += 1
+                rec = self.record_class.unpack(data)
+                if rec.active:
+                    records.append(rec)
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(self.record_class.RECORD_SIZE):
+                    self.read_count += 1
+                    rec = self.record_class.unpack(data)
+                    if rec.active:
+                        records.append(rec)
+            os.remove(self.aux_file)
+
+        records.sort(key=lambda r: r.get_key())
+
+        with open(self.main_file, 'wb') as f:
+            for record in records:
+                f.write(record.pack())
+                self.write_count += 1
+        
+        open(self.aux_file, 'wb').close()
+
     
