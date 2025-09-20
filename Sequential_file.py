@@ -1,8 +1,7 @@
 import csv
 import os
 import struct
-import List
-
+from typing import List
 
 def making_format(list_of_types: List[List[str, str, int]]) -> str:
     FORMAT = ""
@@ -41,33 +40,6 @@ def calc_array_format(field_type: str, field_size: int) -> str:
     else:
         raise ValueError(f"Tipo de array no encontrado, verificar valor ingresado: {field_type}")
 
-
-class Record:
-    FORMAT = ""
-    RECORD_SIZE = 0
-    key_field = "" # clave para el ordenamiento
-    value_type_size = [] # es una tupla de 3 de (valor, tipo, size) para cada campo
-
-    def __init__(self, list_of_types: List[List[str, str, int]]):
-        self.FORMAT = making_format(list_of_types)
-        self.RECORD_SIZE = struct.calcsize(self.FORMAT)
-        self.value_type_size = [(element[0], element[1], element[2]) for element in list_of_types]
-
-    def pack(self) -> bytes:
-        procesados = []
-        for item in self.value_type_size:
-            valor = getattr(self, item[0])
-            procesados.append(procesar_dato(valor, item[1],item[2]))
-        return struct.pack(self.FORMAT, *procesados)
-    
-    @staticmethod
-    def unpack(data):
-        fields = struct.unpack(Record.FORMAT, data)
-        return Record() # mori falta hacer esto bien
-    
-    def get_key(self):
-        return getattr(self, self.key_field)
-
 def procesar_dato(nombre_tipo_tamano: List[str, str, int]):
     if nombre_tipo_tamano[1] == "int":
         return  nombre_tipo_tamano[0]
@@ -84,6 +56,39 @@ def procesar_dato(nombre_tipo_tamano: List[str, str, int]):
     else :
         raise ValueError(f"Tipo no encontrado, verificar valor ingresado: {nombre_tipo_tamano[1]}")
     
+
+class Record:
+    FORMAT = ""
+    RECORD_SIZE = 0
+    key_field = "" # clave para el ordenamiento
+    value_type_size = [] # es una tupla de 3 de (valor, tipo, size) para cada campo
+
+    def __init__(self, list_of_types: List[List[str, str, int]], key_fieldd: str):
+        self.FORMAT = making_format(list_of_types)
+        self.RECORD_SIZE = struct.calcsize(self.FORMAT)
+        self.value_type_size = [(element[0], element[1], element[2]) for element in list_of_types]
+        self.key_field = key_fieldd
+        self.active = True
+
+    def pack(self) -> bytes:
+        procesados = []
+        for item in self.value_type_size:
+            valor = getattr(self, item[0])
+            procesados.append(procesar_dato(valor, item[1],item[2]))
+
+        procesados.append(self.active)
+        format_with_active = self.FORMAT + "?"
+        return struct.pack(format_with_active, *procesados)
+
+    @staticmethod
+    def unpack(data):
+        fields = struct.unpack(Record.FORMAT, data)
+        return Record() # mori falta hacer esto bien
+    
+    def get_key(self):
+        return getattr(self, self.key_field) #retorna dinamicamente el valor del campo clave
+
+
 class SequentialFile:
     def __init__(self, main_file: str, aux_file: str, record_class: Record, k_rec=None):
         self.main_file = main_file
@@ -164,5 +169,45 @@ class SequentialFile:
                 self.write_count += 1
         
         open(self.aux_file, 'wb').close()
+
+
+
+    def add(self, registro : Record):
+        with open(self.main_file, 'rb') as f:
+            while data := f.read(self.record_class.RECORD_SIZE):
+                self.read_count += 1
+                rec = self.record_class.unpack(data)
+                if rec.get_key() == registro.get_key() and rec.active:
+                    return False, f"Error: Registro con clave {registro.get_key()} ya existe en main_file.", rec
+        
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(self.record_class.RECORD_SIZE):
+                    self.read_count += 1
+                    rec = self.record_class.unpack(data)
+                    if rec.get_key() == registro.get_key() and rec.active:
+                        return False, f"Error: Registro con clave {registro.get_key()} ya existe en aux_file.", rec
+
+        registro.active = True  # implementar luego esto *la parte del active y no active)
+        with open(self.aux_file, 'ab') as f:
+            f.write(registro.pack())
+            self.write_count += 1
+        
+        aux_size = self.get_file_size(self.aux_file)
+        if aux_size > self.k:
+            self.rebuild()
+            return True, f"Registro con clave {registro.get_key()} insertado (migrado a main_file por reconstrucción).", registro
+
+        return True, f"Registro con clave {registro.get_key()} insertado en aux_file.", registro
+        
+    
+    def search(key):
+        pass
+
+    def rangeSearch(begin_key, end_key):
+        pass
+
+    def remove(key):
+        pass
 
     
