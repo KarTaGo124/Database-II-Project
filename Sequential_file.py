@@ -45,7 +45,7 @@ def calc_array_format(field_type: str, field_size: int) -> str:
 class Record:
     FORMAT = ""
     RECORD_SIZE = 0
-    key_field = ""
+    key_field = "" # clave para el ordenamiento
     value_type_size = [] # es una tupla de 3 de (valor, tipo, size) para cada campo
 
     def __init__(self, list_of_types: List[List[str, str, int]]):
@@ -63,7 +63,7 @@ class Record:
     @staticmethod
     def unpack(data):
         fields = struct.unpack(Record.FORMAT, data)
-        return Record() # mori
+        return Record() # mori falta hacer esto bien
 
 def procesar_dato(nombre_tipo_tamano: List[str, str, int]):
     if nombre_tipo_tamano[1] == "int":
@@ -105,3 +105,32 @@ class SequentialFile:
             "Escrituras": self.write_count,
             "Total": self.read_count + self.write_count
         }
+    
+    def get_file_size(self, filename: str) -> int: # esto devuelve el numero de records en el archivo (general main o aux)
+        if not os.path.exists(filename):
+            return 0
+        file_size = os.path.getsize(filename)
+        return file_size // self.record_class.RECORD_SIZE
+    
+
+    def show_all_records_from_main_and_aux(self) -> List[Record]:
+
+        records = []
+        
+        with open(self.main_file, 'rb') as f:
+            while data := f.read(self.record_class.RECORD_SIZE):
+                self.read_count += 1
+                rec = self.record_class.unpack(data)
+                if rec.active:
+                    records.append(rec)
+        
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(self.record_class.RECORD_SIZE):
+                    self.read_count += 1
+                    rec = self.record_class.unpack(data)
+                    if rec.active:
+                        records.append(rec)
+        
+        return records
+    
