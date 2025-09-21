@@ -201,11 +201,7 @@ class SequentialFile:
         return True, f"Registro con clave {registro.get_key()} insertado en aux_file.", registro
         
     
-    def search(key):
-        pass
 
-    def rangeSearch(begin_key, end_key):
-        pass
 
     def remove(self, key):
         with open(self.main_file, 'r+b') as f:
@@ -243,4 +239,51 @@ class SequentialFile:
 
         return False, f"Error: Registro con clave {key} no existe.", None
 
-    
+    def search(self, key): #voy a implementar la busqueda binaria en main y en aux secuencial
+        main_size = self.get_file_size(self.main_file)
+        if main_size > 0:
+            with open(self.main_file, 'rb') as f:
+                left, right = 0, main_size - 1
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    f.seek(mid * self.record_class.RECORD_SIZE)
+                    data = f.read(self.record_class.RECORD_SIZE)
+                    self.read_count += 1
+                    
+                    if not data:
+                        break
+                        
+                    rec = self.record_class.unpack(data)
+                    rec_key = rec.get_key()
+                    
+                    if rec_key == key:
+                        if rec.active:
+                            return True, f"Registro con clave {key} encontrado en main_file.", rec
+                        else:
+                            return False, f"Registro con clave {key} está eliminado en main_file.", None
+                    elif rec_key < key:
+                        left = mid + 1
+                    else:
+                        right = mid - 1
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while True:
+                    data = f.read(self.record_class.RECORD_SIZE)
+                    if not data:
+                        break
+                        
+                    self.read_count += 1
+                    rec = self.record_class.unpack(data)
+                    
+                    if rec.get_key() == key:
+                        if rec.active:
+                            return True, f"Registro con clave {key} encontrado en aux_file.", rec
+                        else:
+                            return False, f"Registro con clave {key} está eliminado en aux_file.", None
+        
+        return False, f"Error: Registro con clave {key} no existe.", None
+
+    def rangeSearch(self, begin_key, end_key):
+        pass
