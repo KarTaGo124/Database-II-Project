@@ -1,3 +1,4 @@
+/.venv/
 # Python
 __pycache__/
 *.py[cod]
@@ -24,7 +25,8 @@ wheels/
 venv/
 env/
 ENV/
-
+/.venv/
+/.idea/
 # IDE
 .vscode/
 .idea/
