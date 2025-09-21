@@ -27,9 +27,9 @@ class Serializer:
         return b''.join(pack)
 
     @staticmethod
-    def unpack(self, data):
+    def unpack(data,record_format):
         record = SimpleNamespace()
-        for (name, format) in self.record_format:  #according to the format
+        for (name, format) in record_format:  #according to the format
             if format[0] == '*':  #if its varialbe length
                 n = struct.unpack('i', data[:4])[0]  #we get the amount, [0] because it returns a tuple
                 val = struct.unpack(f'{n}' + format[1:],
@@ -48,17 +48,55 @@ class Serializer:
         return record
 
 
+#max overflow 1 bucket
 class Bucket:
-    BLOCK_SIZE = 4096  # 4KB page size
-    HEADER_FORMAT = "iii"  # local_depth, record pointer, slot size
+    BLOCK_SIZE = 4096  # 4KB block size
+    HEADER_FORMAT = "iiii"  # local_depth, record pointer, slot size, next
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
     SLOT_FORMAT = "ii"  # offset, length of each record
     SLOT_SIZE = struct.calcsize(SLOT_FORMAT)
-    # we will use every space available to save records
+    # we will use every space available to save records until it doesnt fit
 
-    def __init__(self, local_depth=1, record_pointer=0, slot_size=0, slots=None, records=None):
+    def __init__(self, local_depth=1,slot_size=0, record_pointer=BLOCK_SIZE,  next_bucket=None):
         self.local_depth = local_depth
-        self.slot_size = 0
-        self.record_pointer = self.HEADER_SIZE
-        self.slots = {}
-        self.records = {}
+        self.slot_size = slot_size
+        self.record_pointer =  record_pointer
+        self.next_bucket = next_bucket
+
+    def get_free_space(self):
+        return self.record_pointer - self.HEADER_SIZE - self.SLOT_SIZE * self.slot_size
+
+    def insert(self, data: bytes, file, bucket_pos: int):
+        length = len(data)
+        if length > self.get_free_space():
+            return False #check if space for record
+        new_record_pointer = self.record_pointer - length
+        slot_pos = self.HEADER_SIZE + self.slot_size * self.SLOT_SIZE
+        # check if slot and record will cross each other
+        if new_record_pointer < slot_pos:
+            return False # no room for both so split or overflow
+        # 1) reserve space
+        self.record_pointer = new_record_pointer
+
+        # 2) write record payload
+        file.seek(bucket_pos + self.record_pointer)
+        file.write(data)
+
+        # 3) write new slot entry
+        file.seek(bucket_pos + slot_pos)
+        file.write(struct.pack(self.SLOT_FORMAT, self.record_pointer, length))
+
+        # 4) update slot count
+        self.slot_size += 1
+
+        # 5) update header (with new record_pointer!)
+        file.seek(bucket_pos)
+        file.write(struct.pack(
+            self.HEADER_FORMAT,
+            self.local_depth,
+            self.slot_size,
+            self.record_pointer,
+            self.next_bucket
+        ))
+
+        return True
