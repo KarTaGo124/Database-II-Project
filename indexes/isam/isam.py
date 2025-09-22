@@ -58,7 +58,6 @@ class Page:
             offset += Record.SIZE_OF_RECORD
         return Page(records, next_page)
     
-    # inserta un registro en su posición correcta usando búsqueda binaria
     def insert_sorted(self, record):
         left, right = 0, len(self.records)
         while left < right:
@@ -72,7 +71,6 @@ class Page:
     def is_full(self):
         return len(self.records) >= BLOCK_FACTOR
     
-    # busca y elimina el registro con el id dado usando búsqueda binaria
     def remove_record(self, id_venta):
         original_count = len(self.records)
         left, right = 0, len(self.records) - 1
@@ -104,15 +102,6 @@ class Page:
     def is_empty(self):
         return len(self.records) == 0
     
-    # verifica si dos páginas se pueden juntar sin exceder el límite
-    def can_merge_with(self, other_page):
-        return len(self.records) + len(other_page.records) <= BLOCK_FACTOR
-    
-    # combina los registros de dos páginas manteniéndolos ordenados
-    def merge_with(self, other_page):
-        all_records = self.records + other_page.records
-        all_records.sort(key=lambda r: r.id_venta)
-        self.records = all_records
     
 class RootIndexEntry:
     FORMAT = "ii"
