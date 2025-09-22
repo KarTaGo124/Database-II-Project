@@ -32,6 +32,7 @@ class Record:
     def __str__(self):
         return f"{self.id_venta} - {self.nombre_producto} - {self.cantidad_vendida} - {self.precio_unitario} - {self.fecha_venta}"
 
+
 class Page:
     HEADER_FORMAT = 'ii'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
@@ -102,6 +103,14 @@ class Page:
     def is_empty(self):
         return len(self.records) == 0
     
+    def can_merge_with(self, other_page):
+        return len(self.records) + len(other_page.records) <= BLOCK_FACTOR
+    
+    def merge_with(self, other_page):
+        all_records = self.records + other_page.records
+        all_records.sort(key=lambda r: r.id_venta)
+        self.records = all_records
+
 
 class RootIndexEntry:
     FORMAT = "ii"
@@ -328,112 +337,119 @@ class FreeListStack:
         return self.get_free_count() == 0
 
 
-
 class ISAMFile:
-    HEADER_FORMAT = 'i'  # contador de páginas libres
+    HEADER_FORMAT = 'i'  
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    MAX_FREE_PAGES = 5  # máximo número de páginas libres a guardar
-    FREE_LIST_SIZE = MAX_FREE_PAGES * 4
-    # vamos a tener que tener encuenta siempre el offset que genera la free list y su contador
-    DATA_START_OFFSET = HEADER_SIZE + FREE_LIST_SIZE
+    DATA_START_OFFSET = HEADER_SIZE  
     
-    def __init__(self, filename="datos.dat", indexfile="index.dat"):
+    # Inicialización
+
+    def __init__(self, filename="datos.dat", root_index_file="root_index.dat", leaf_index_file="leaf_index.dat", free_list_file="free_list.dat"):
         self.filename = filename
-        self.indexfile = indexfile
+        self.root_index_file = root_index_file
+        self.leaf_index_file = leaf_index_file
+        self.free_list_stack = FreeListStack(free_list_file)
         self.next_page_number = 0
+        self.next_root_index_page_number = 0
+        self.next_leaf_index_page_number = 0
 
-    def _push_free_page(self, file, page_num):
-        free_count = self._read_free_count(file)
-        
-        if free_count >= self.MAX_FREE_PAGES:
-            return False  
-        
-        free_pos = self.HEADER_SIZE + free_count * 4
-        file.seek(free_pos)
-        file.write(struct.pack('i', page_num))
-        
-        file.seek(0)
-        file.write(struct.pack(self.HEADER_FORMAT, free_count + 1))
-        
-        return True
-    
-    def _pop_free_page(self, file):
-        free_count = self._read_free_count(file)
-        if free_count == 0:
-            return None
-        
-        last_pos = self.HEADER_SIZE + (free_count - 1) * 4
-        file.seek(last_pos)
-        page_num = struct.unpack('i', file.read(4))[0]
-        
-        file.seek(last_pos)
-        file.write(b'\x00\x00\x00\x00')
-        file.seek(0)
-        file.write(struct.pack(self.HEADER_FORMAT, free_count - 1))
-        
-        return page_num
-    
-    def _read_free_count(self, file):
-        file.seek(0)
-        return struct.unpack(self.HEADER_FORMAT, file.read(self.HEADER_SIZE))[0]
-
-    def _is_overflow_page(self, page_num):
-        if not os.path.exists(self.indexfile):
-            return page_num > 0
-        
-        with open(self.indexfile, "rb") as file:
-            index_file = self._read_index_file(file, 0)
-            for entry in index_file.entries:
-                if entry.page_number == page_num:
-                    return False
-            return True
-
-    # inserta un nuevo registro en la página correcta del archivo
-    def add(self, record: Record):
-        if not os.path.exists(self.filename):
-            self._create_initial_files(record)
-            return
-
-        target_page_num = self._find_target_page(record.id_venta)
-        
-        with open(self.filename, "r+b") as file:
-            page = self._read_page(file, target_page_num)
-            
-            if not page.is_full():
-                page.insert_sorted(record)
-                self._write_page(file, target_page_num, page)
-            else:
-                # maneja el overflow al momento de querer insertar un nuevo registro cuando la page donde tiene que estar está llena
-                self._handle_page_overflow(file, target_page_num, page, record)
-
-    # creamos los archivos de datos e índice cuando no existen todavía
     def _create_initial_files(self, record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 0))
-            file.write(b'\x00' * self.FREE_LIST_SIZE)
             page = Page([record])
             file.write(page.pack())
+
+        with open(self.leaf_index_file, "wb") as file:
+            initial_entry = LeafIndexEntry(record.id_venta, 0)
+            leaf_index = LeafIndex([initial_entry])
+            file.write(leaf_index.pack())
+
+        with open(self.root_index_file, "wb") as file:
+            root_index = RootIndex([])
+            file.write(root_index.pack())
         
-        with open(self.indexfile, "wb") as file:
-            index_file = IndexFile([])
-            file.write(index_file.pack())
+        self.free_list_stack.clear()
         
         self.next_page_number = 1
+        self.next_leaf_index_page_number = 1
+        self.next_root_index_page_number = 1
 
-    # decide cómo manejar cuando una página está llena y llega un nuevo registro
-    def _handle_page_overflow(self, file, page_num, page, new_record):
-        with open(self.indexfile, "rb") as index_file:
-            index_file_obj = self._read_index_file(index_file, 0)
+    # Manejo de la free list
+    
+    def _push_free_page(self, page_num):
+        return self.free_list_stack.push_free_page(page_num)
+
+    def _pop_free_page(self):
+        return self.free_list_stack.pop_free_page()
+
+    def _get_free_count(self):
+        return self.free_list_stack.get_free_count()
+
+    # Escritura y lectura de páginas e índices
+    
+    def _read_page(self, file, page_num):
+        offset = self.DATA_START_OFFSET + (page_num * Page.SIZE_OF_PAGE)
+        file.seek(offset)
+        return Page.unpack(file.read(Page.SIZE_OF_PAGE))
+
+    def _write_page(self, file, page_num, page):
+        offset = self.DATA_START_OFFSET + (page_num * Page.SIZE_OF_PAGE)
+        file.seek(offset)
+        file.write(page.pack())
+
+    def _read_root_index(self, file, page_num):
+        file.seek(page_num * RootIndex.SIZE_OF_ROOT_INDEX)
+        return RootIndex.unpack(file.read(RootIndex.SIZE_OF_ROOT_INDEX))
+
+    def _write_root_index(self, file, page_num, root_index):
+        file.seek(page_num * RootIndex.SIZE_OF_ROOT_INDEX)
+        file.write(root_index.pack())
+
+    def _read_leaf_index(self, file, page_num):
+        file.seek(page_num * LeafIndex.SIZE_OF_LEAF_INDEX)
+        return LeafIndex.unpack(file.read(LeafIndex.SIZE_OF_LEAF_INDEX))
+
+    def _write_leaf_index(self, file, page_num, leaf_index):
+        file.seek(page_num * LeafIndex.SIZE_OF_LEAF_INDEX)
+        file.write(leaf_index.pack())
+
+    # Operaciones comunes
+    
+    def _find_target_leaf_page(self, id_venta):
+        if not os.path.exists(self.root_index_file):
+            return 0
+        
+        with open(self.root_index_file, "rb") as file:
+            root_index = self._read_root_index(file, 0)
+            return root_index.find_leaf_page_for_key(id_venta)
+
+    def _find_target_data_page(self, id_venta, leaf_page_num):
+        if not os.path.exists(self.leaf_index_file):
+            return 0
+        
+        with open(self.leaf_index_file, "rb") as file:
+            leaf_index = self._read_leaf_index(file, leaf_page_num)
+            return leaf_index.find_data_page_for_key(id_venta)
+
+    def _handle_page_overflow(self, file, page_num, page, new_record, current_leaf_page_num):
+        with open(self.leaf_index_file, "rb") as leaf_index_file:
+            leaf_index_obj = self._read_leaf_index(leaf_index_file, current_leaf_page_num)
             
-            if not index_file_obj.is_full():
-                # Opción 1 : divide la página e inserta nueva key al indexfile porque todavía hay espacio
-                self._split_page_strategy(file, page_num, page, new_record)
+            if not leaf_index_obj.is_full():
+                # Estrategia 1: Split página de datos
+                self._split_page_strategy(file, page_num, page, new_record, current_leaf_page_num)
             else:
-                # Opción 2: una vez se llene el indexfile, se empieza a utilizar la técnica de encadenamiento de pages usando el atributo next_page 
-                self._overflow_page_strategy(file, page_num, page, new_record)
+                with open(self.root_index_file, "rb") as root_file:
+                    root_index_obj = self._read_root_index(root_file, 0)
 
-    # divide una página llena en dos y actualiza el índice
-    def _split_page_strategy(self, file, page_num, page, new_record):
+                    if not root_index_obj.is_full():
+                        # Estrategia 2: Split leaf index
+                        self._split_leaf_index_strategy(file, page_num, page, new_record, current_leaf_page_num)
+                    else:
+                        # Estrategia 3: Overflow chain
+                        self._overflow_page_strategy(file, page_num, page, new_record)
+
+    def _split_page_strategy(self, file, page_num, page, new_record, leaf_page_num):
         all_records = page.records + [new_record]
         all_records.sort(key=lambda r: r.id_venta)
         
@@ -450,10 +466,56 @@ class ISAMFile:
         file.write(right_page.pack())
         
         separator_key = right_records[0].id_venta
-        self._update_index_with_new_page(separator_key, new_page_num)
+        self._update_leaf_index_with_new_page(separator_key, new_page_num, leaf_page_num)
         self.next_page_number = new_page_num + 1
 
-    # crea páginas adicionales encadenadas cuando el índice está lleno
+    def _split_leaf_index_strategy(self, file, page_num, page, new_record, leaf_page_num):
+
+        all_records = page.records + [new_record]
+        all_records.sort(key=lambda r: r.id_venta)
+        
+        mid_point = len(all_records) // 2
+        left_records = all_records[:mid_point]
+        right_records = all_records[mid_point:]
+        
+        left_page = Page(left_records)
+        self._write_page(file, page_num, left_page)
+        
+        file.seek(0, 2)
+        new_data_page_num = (file.tell() - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+        right_page = Page(right_records)
+        file.write(right_page.pack())
+        self.next_page_number = new_data_page_num + 1
+        
+        separator_key = right_records[0].id_venta
+        
+        with open(self.leaf_index_file, "r+b") as leaf_index_file:
+            current_leaf_index = self._read_leaf_index(leaf_index_file, leaf_page_num)
+            
+            new_entry = LeafIndexEntry(separator_key, new_data_page_num)
+            current_leaf_index.insert_sorted(new_entry)
+            
+            if len(current_leaf_index.entries) > LEAF_INDEX_BLOCK_FACTOR:
+                self._split_leaf_index_page(leaf_index_file, leaf_page_num, current_leaf_index)
+            else:
+                self._write_leaf_index(leaf_index_file, leaf_page_num, current_leaf_index)
+
+    def _split_leaf_index_page(self, leaf_index_file, leaf_page_num, overloaded_leaf_index):
+        mid_point = len(overloaded_leaf_index.entries) // 2
+        left_entries = overloaded_leaf_index.entries[:mid_point]
+        right_entries = overloaded_leaf_index.entries[mid_point:]
+        
+        left_leaf_index = LeafIndex(left_entries, overloaded_leaf_index.next_page)
+        self._write_leaf_index(leaf_index_file, leaf_page_num, left_leaf_index)
+        
+        leaf_index_file.seek(0, 2)
+        new_leaf_page_num = leaf_index_file.tell() // LeafIndex.SIZE_OF_LEAF_INDEX
+        right_leaf_index = LeafIndex(right_entries)
+        leaf_index_file.write(right_leaf_index.pack())
+        
+        separator_key = right_entries[0].key
+        self._update_root_index_with_new_page(separator_key, new_leaf_page_num)
+
     def _overflow_page_strategy(self, file, page_num, original_page, new_record):
         page_num_found, page_found, need_new_page = self._find_available_or_last_page_in_chain(file, page_num)
         
@@ -461,12 +523,10 @@ class ISAMFile:
             page_found.insert_sorted(new_record)
             self._write_page(file, page_num_found, page_found)
         else:
-            # intentamos usar una página libre primero
-            free_page_num = self._pop_free_page(file)
+            free_page_num = self.free_list_stack.pop_free_page()
             if free_page_num is not None:
                 new_overflow_page_num = free_page_num
             else:
-                # si no hay páginas libres, creamos una nueva al final del archivo
                 file.seek(0, 2)
                 new_overflow_page_num = (file.tell() - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
                 self.next_page_number = new_overflow_page_num + 1
@@ -477,7 +537,6 @@ class ISAMFile:
             page_found.next_page = new_overflow_page_num
             self._write_page(file, page_num_found, page_found)
 
-    # encuentra la primera página con espacio o la última si todas están llenas
     def _find_available_or_last_page_in_chain(self, file, start_page_num):
         current_page_num = start_page_num
         
@@ -494,230 +553,28 @@ class ISAMFile:
         
         return start_page_num, None, True
 
-    # agrega una nueva entrada al indexfile manteniéndolo ordenado
-    def _update_index_with_new_page(self, key, page_num):
-        with open(self.indexfile, "r+b") as file:
-            index_file = self._read_index_file(file, 0)
-            new_entry = IndexPage(key, page_num)
-            
-            index_file.insert_sorted(new_entry)
-            self._write_index_file(file, 0, index_file)
+    def _update_leaf_index_with_new_page(self, key, page_num, leaf_page_num):
+        with open(self.leaf_index_file, "r+b") as file:
+            leaf_index = self._read_leaf_index(file, leaf_page_num)
+            new_entry = LeafIndexEntry(key, page_num)
+            leaf_index.insert_sorted(new_entry)
 
-    # busca en qué página debería estar un registro según su id
-    def _find_target_page(self, id_venta):
-        if not os.path.exists(self.indexfile):
-            return 0
-        
-        with open(self.indexfile, "rb") as file:
-            index_file = self._read_index_file(file, 0)
-            return index_file.find_page_for_key(id_venta)
-
-    def _read_page(self, file, page_num):
-        offset = self.DATA_START_OFFSET + (page_num * Page.SIZE_OF_PAGE)
-        file.seek(offset)
-        return Page.unpack(file.read(Page.SIZE_OF_PAGE))
-
-    def _write_page(self, file, page_num, page):
-        offset = self.DATA_START_OFFSET + (page_num * Page.SIZE_OF_PAGE)
-        file.seek(offset)
-        file.write(page.pack())
-
-    def _read_index_file(self, file, page_num):
-        file.seek(page_num * IndexFile.SIZE_OF_INDEX_FILE)
-        return IndexFile.unpack(file.read(IndexFile.SIZE_OF_INDEX_FILE))
-
-    def _write_index_file(self, file, page_num, index_file):
-        file.seek(page_num * IndexFile.SIZE_OF_INDEX_FILE)
-        file.write(index_file.pack())
-
-    def _add_free_page(self, page_num):
-        with open(self.freelist_file, "ab") as file:
-            file.write(struct.pack('i', page_num))
-    
-    def _get_free_page(self):
-        if not os.path.exists(self.freelist_file):
-            return None
-        
-        with open(self.freelist_file, "rb") as file:
-            file.seek(0, 2)  # ir al final
-            file_size = file.tell()
-            if file_size < 4:
-                return None
-            
-            file.seek(file_size - 4)
-            page_num = struct.unpack('i', file.read(4))[0]
-        
-        with open(self.freelist_file, "r+b") as file:
-            file.truncate(file_size - 4)
-        
-        return page_num
-
-    def _is_overflow_page(self, page_num):
-        if not os.path.exists(self.indexfile):
-            return page_num > 0
-        
-        with open(self.indexfile, "rb") as file:
-            index_file = self._read_index_file(file, 0)
-            for entry in index_file.entries:
-                if entry.page_number == page_num:
-                    return False
-            return True
-
-    # búsqueda binaria para encontrar la target page en el indexfile y también para encontrar el lugar exacto del registro dentro de la target page
-    def search(self, id_venta):
-        if not os.path.exists(self.filename):
-            return None
-        
-        target_page_num = self._find_target_page(id_venta)
-        
-        with open(self.filename, "rb") as file:
-            current_page_num = target_page_num
-            
-            while current_page_num != -1:
-                page = self._read_page(file, current_page_num)
-                
-                left, right = 0, len(page.records) - 1
-                while left <= right:
-                    mid = (left + right) // 2
-                    if page.records[mid].id_venta == id_venta:
-                        return page.records[mid]  
-                    elif page.records[mid].id_venta < id_venta:
-                        left = mid + 1
-                    else:
-                        right = mid - 1
-                
-                current_page_num = page.next_page if page.next_page != -1 else -1
-            
-            return None  
-
-    # muestra la estructura del indexfile
-    def show_index_structure(self):
-        if os.path.exists(self.indexfile):
-            with open(self.indexfile, "rb") as file:
-                index_file = self._read_index_file(file, 0)
-                
-                if index_file.entries:
-                    
-                    header_physical = "|P0|"
-                    for i, entry in enumerate(index_file.entries):
-                        header_physical += f"K{entry.key}|P{entry.page_number}|"
-                    print(f"{header_physical}")
-                    
-                else:
-                    print("|P0| (índice vacío - solo página 0)")
-
-    # muestra todos los registros y pages
-    def scanAll(self):
-        if not os.path.exists(self.filename):
-            return
-            
-        with open(self.filename, "rb") as file:
-            num_pages = os.path.getsize(self.filename) // Page.SIZE_OF_PAGE
-            visited = set()
-            
-            for i in range(num_pages):
-                if i in visited:
-                    continue
-                    
-                current_page_num = i
-                while current_page_num is not None and current_page_num not in visited:
-                    visited.add(current_page_num)
-                    page = self._read_page(file, current_page_num)
-                    
-                    ids = [record.id_venta for record in page.records]
-                    next_page_info = f"next_page: {page.next_page}" if page.next_page != -1 else "next_page: None"
-                    print(f"Página {current_page_num}: IDs {ids}, {next_page_info}")
-                    
-                    current_page_num = page.next_page if page.next_page != -1 else None
-
-    # elimina un registro reorganizando toda la cadena de páginas
-    def delete(self, id_venta):
-        if not os.path.exists(self.filename):
-            return False
-        
-        target_page_num = self._find_target_page(id_venta)
-        
-        with open(self.filename, "r+b") as file:
-            main_page = self._read_page(file, target_page_num)
-            
-            found_in_main = any(r.id_venta == id_venta for r in main_page.records)
-            
-            if found_in_main:
-                return self._delete_from_page_chain(file, target_page_num, id_venta)
-            
-            return self._delete_from_overflow_chain(file, target_page_num, id_venta)
-
-    # elimina registros de toda una cadena de páginas enlazadas
-    def _delete_from_page_chain(self, file, start_page_num, id_venta):
-        pages_to_process = []
-        current_page_num = start_page_num
-        
-        while current_page_num != -1:
-            page = self._read_page(file, current_page_num)
-            pages_to_process.append((current_page_num, page))
-            current_page_num = page.next_page
-        
-        deleted_count = 0
-        all_records = []
-        
-        for page_num, page in pages_to_process:
-            for record in page.records:
-                if record.id_venta != id_venta:
-                    all_records.append(record)
-                else:
-                    deleted_count += 1
-        
-        if deleted_count == 0:
-            return False
-        
-        self._reorganize_pages(file, pages_to_process, all_records)
-        return True
-    
-    # redistribuye los registros restantes en las páginas disponibles
-    def _reorganize_pages(self, file, original_pages, remaining_records):
-        if not remaining_records:
-            for page_num, _ in original_pages:
-                empty_page = Page()
-                self._write_page(file, page_num, empty_page)
-            return
-        
-        remaining_records.sort(key=lambda r: r.id_venta)
-        
-        page_index = 0
-        record_index = 0
-        
-        while record_index < len(remaining_records) and page_index < len(original_pages):
-            page_num, _ = original_pages[page_index]
-            
-            page_records = []
-            while (record_index < len(remaining_records) and 
-                   len(page_records) < BLOCK_FACTOR):
-                page_records.append(remaining_records[record_index])
-                record_index += 1
-            
-            next_page = -1
-            if (record_index < len(remaining_records) and 
-                page_index + 1 < len(original_pages)):
-                next_page = original_pages[page_index + 1][0]
-            
-            new_page = Page(page_records, next_page)
-            self._write_page(file, page_num, new_page)
-            page_index += 1
-        
-        while page_index < len(original_pages):
-            page_num, _ = original_pages[page_index]
-            
-            # si es una página de overflow (no está en el índice), la mandamos a la free list
-            if self._is_overflow_page(page_num):
-                self._push_free_page(file, page_num)
+            if len(leaf_index.entries) > LEAF_INDEX_BLOCK_FACTOR:
+                self._split_leaf_index_page(file, leaf_page_num, leaf_index)
             else:
-                # si es una página principal, la dejamos vacía porque luego puede usarse para nuevos registros
-                empty_page = Page()
-                self._write_page(file, page_num, empty_page)
-            
-            page_index += 1
+                self._write_leaf_index(file, leaf_page_num, leaf_index)
 
-    # busca y elimina un registro en páginas de overflow enlazadas
+    def _update_root_index_with_new_page(self, key, leaf_page_num):
+        with open(self.root_index_file, "r+b") as file:
+            root_index = self._read_root_index(file, 0)
+            new_entry = RootIndexEntry(key, leaf_page_num)
+            root_index.insert_sorted(new_entry)
+            
+            if root_index.is_full():
+                print("WARNING: Root index is full.")
+            
+            self._write_root_index(file, 0, root_index)
+
     def _delete_from_overflow_chain(self, file, start_page_num, id_venta):
         current_page_num = start_page_num
         
@@ -727,11 +584,9 @@ class ISAMFile:
             if page.remove_record(id_venta):
                 self._write_page(file, current_page_num, page)
                 
-                # si una pagina overflow queda vacia entonces la mandamos a la free list
                 if len(page.records) == 0 and self._is_overflow_page(current_page_num):
                     self._remove_page_from_chain(file, start_page_num, current_page_num)
-                    self._push_free_page(file, current_page_num)
-                # si aun no esta vacia pero tiene pocos registros entonces intentamos consolidarla con la siguiente
+                    self.free_list_stack.push_free_page(current_page_num)
                 elif len(page.records) <= BLOCK_FACTOR // 3:
                     self._try_consolidate_page(file, current_page_num)
                 
@@ -740,8 +595,26 @@ class ISAMFile:
             current_page_num = page.next_page
         
         return False
-    
-    # desconectamos una página de overflow vacía su cadena
+
+    def _try_consolidate_page(self, file, page_num):
+        page = self._read_page(file, page_num)
+        
+        if page.next_page != -1:
+            next_page_num = page.next_page
+            next_page = self._read_page(file, next_page_num)
+            
+            if page.can_merge_with(next_page):
+                page.merge_with(next_page)
+                page.next_page = next_page.next_page
+                
+                self._write_page(file, page_num, page)
+                
+                if self._is_overflow_page(next_page_num):
+                    self.free_list_stack.push_free_page(next_page_num)
+                else:
+                    empty_page = Page()
+                    self._write_page(file, next_page_num, empty_page)
+
     def _remove_page_from_chain(self, file, start_page_num, page_to_remove):
         if start_page_num == page_to_remove:
             return
@@ -758,118 +631,232 @@ class ISAMFile:
             
             current_page_num = page.next_page
 
-    # elimina un registro y reorganiza las páginas si quedan muy vacías
-    def delete_optimized(self, id_venta):
+    # Operaciones principales
+    
+    def add(self, record: Record):
+        if not os.path.exists(self.filename):
+            self._create_initial_files(record)
+            return
+
+        target_leaf_page_num = self._find_target_leaf_page(record.id_venta)
+        
+        target_data_page_num = self._find_target_data_page(record.id_venta, target_leaf_page_num)
+        
+        with open(self.filename, "r+b") as file:
+            page = self._read_page(file, target_data_page_num)
+            
+            if not page.is_full():
+                page.insert_sorted(record)
+                self._write_page(file, target_data_page_num, page)
+            else:
+                self._handle_page_overflow(file, target_data_page_num, page, record, target_leaf_page_num)
+
+    def search(self, id_venta):
+        if not os.path.exists(self.filename):
+            return None
+        
+        target_leaf_page_num = self._find_target_leaf_page(id_venta)
+        target_data_page_num = self._find_target_data_page(id_venta, target_leaf_page_num)
+        with open(self.filename, "rb") as file:
+            current_page_num = target_data_page_num
+            
+            while current_page_num != -1:
+                page = self._read_page(file, current_page_num)
+
+                for record in page.records:
+                    if record.id_venta == id_venta:
+                        return record
+                    elif record.id_venta > id_venta:
+                        break
+
+                current_page_num = page.next_page if page.next_page != -1 else -1
+            
+            return None
+
+    def delete(self, id_venta):
         if not os.path.exists(self.filename):
             return False
         
-        target_page_num = self._find_target_page(id_venta)
+        target_leaf_page_num = self._find_target_leaf_page(id_venta)
+        target_data_page_num = self._find_target_data_page(id_venta, target_leaf_page_num)
         
         with open(self.filename, "r+b") as file:
-            page = self._read_page(file, target_page_num)
+            page = self._read_page(file, target_data_page_num)
             
             if page.remove_record(id_venta):
-                self._write_page(file, target_page_num, page)
+                self._write_page(file, target_data_page_num, page)
                 
                 if len(page.records) <= BLOCK_FACTOR // 3:
-                    self._try_consolidate_page(file, target_page_num)
+                    self._try_consolidate_page(file, target_data_page_num)
                 
                 return True
             
-            return self._delete_from_overflow_chain(file, target_page_num, id_venta)
-    
-    # junta páginas que tienen pocos registros para aprovechar mejor el espacio
-    def _try_consolidate_page(self, file, page_num):
-        page = self._read_page(file, page_num)
+            return self._delete_from_overflow_chain(file, target_data_page_num, id_venta)
+
+    def range_search(self, begin_key, end_key):
+        results = []
+
+        if not os.path.exists(self.filename):
+            return results
+
+        with open(self.filename, "rb") as file:
+            file_size = os.path.getsize(self.filename)
+            if file_size < self.DATA_START_OFFSET:
+                return results
+
+            num_pages = (file_size - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+            visited_pages = set()
+
+            for page_num in range(num_pages):
+                if page_num in visited_pages:
+                    continue
+
+                current_page_num = page_num
+                while current_page_num is not None and current_page_num not in visited_pages:
+                    visited_pages.add(current_page_num)
+                    page = self._read_page(file, current_page_num)
+
+                    for record in page.records:
+                        if begin_key <= record.id_venta <= end_key:
+                            results.append(record)
+
+                    current_page_num = page.next_page if page.next_page != -1 else None
+
+        results.sort(key=lambda r: r.id_venta)
+        return results
+
+    # Funciones extras
+
+    def _is_overflow_page(self, page_num):
+        if not os.path.exists(self.leaf_index_file):
+            return page_num > 0
         
-        if page.next_page != -1:
-            next_page_num = page.next_page
-            next_page = self._read_page(file, next_page_num)
+        try:
+            with open(self.leaf_index_file, "rb") as file:
+                file_size = os.path.getsize(self.leaf_index_file)
+                num_leaf_pages = file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+                
+                for i in range(num_leaf_pages):
+                    leaf_index = self._read_leaf_index(file, i)
+                    for entry in leaf_index.entries:
+                        if entry.data_page_number == page_num:
+                            return False
+                return True
+        except:
+            return page_num > 0
+
+    def validate_index_consistency(self):
+        errors = []
+        files_to_check = [
+            (self.filename, "Archivo de datos"),
+            (self.leaf_index_file, "Archivo de índice Leaf"),
+            (self.root_index_file, "Archivo de índice Root")
+        ]
+        
+        for file_path, file_desc in files_to_check:
+            if not os.path.exists(file_path):
+                errors.append(f"{file_desc} no existe")
+        
+        if errors:
+            return errors
+        
+        try:
+
+            with open(self.root_index_file, "rb") as root_file:
+                root_index = self._read_root_index(root_file, 0)
+                
+                with open(self.leaf_index_file, "rb") as leaf_file:
+                    leaf_file_size = os.path.getsize(self.leaf_index_file)
+                    num_leaf_pages = leaf_file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+                    
+
+                    for root_entry in root_index.entries:
+                        if root_entry.leaf_page_number >= num_leaf_pages:
+                            errors.append(f"Root apunta a página Leaf inexistente: {root_entry.leaf_page_number}")
+                    
+
+                    with open(self.filename, "rb") as data_file:
+                        data_file_size = os.path.getsize(self.filename)
+                        num_data_pages = (data_file_size - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+                        
+                        for i in range(num_leaf_pages):
+                            leaf_index = self._read_leaf_index(leaf_file, i)
+                            for leaf_entry in leaf_index.entries:
+                                if leaf_entry.data_page_number >= num_data_pages:
+                                    errors.append(f"Leaf apunta a página de datos inexistente: {leaf_entry.data_page_number}")
             
-            if page.can_merge_with(next_page):
-                page.merge_with(next_page)
-                page.next_page = next_page.next_page
-                
-                self._write_page(file, page_num, page)
-                
-                # si la page que se eliminó era de overflow, la mandamos a la free list
-                if self._is_overflow_page(next_page_num):
-                    self._push_free_page(file, next_page_num)
-                # si era una page principal, la dejamos vacía
+
+                    
+        except Exception as e:
+            errors.append(f"Error durante validación: {str(e)}")
+        
+        return errors
+
+    def show_structure(self):
+        print("=== ESTRUCTURA DEL ISAM DE DOS NIVELES ===")
+        
+        free_count = self.free_list_stack.get_free_count()
+        print(f"\n--- FREE LIST ---")
+        print(f"  Páginas libres: {free_count}")
+        
+        print("\n--- ROOT INDEX ---")
+        if os.path.exists(self.root_index_file):
+            with open(self.root_index_file, "rb") as file:
+                root_index = self._read_root_index(file, 0)
+                if root_index.entries:
+                    for entry in root_index.entries:
+                        print(f"  {entry}")
                 else:
-                    empty_page = Page()
-                    self._write_page(file, next_page_num, empty_page)
+                    print("  (vacío - apunta por defecto a Leaf Page 0)")
+        else:
+            print("  (no existe)")
+        
+        print("\n--- LEAF INDEX ---")
+        if os.path.exists(self.leaf_index_file):
+            with open(self.leaf_index_file, "rb") as file:
+                file_size = os.path.getsize(self.leaf_index_file)
+                num_leaf_pages = file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+                
+                for i in range(num_leaf_pages):
+                    leaf_index = self._read_leaf_index(file, i)
+                    print(f"  Leaf Page {i}:")
+                    if leaf_index.entries:
+                        for entry in leaf_index.entries:
+                            print(f"    {entry}")
+                    else:
+                        print("    (empty)")
+        else:
+            print("  (no existe)")
 
-def load_csv_data(filename):
-    records = []
-    with open(filename, 'r', encoding='utf-8') as file:
-        lines = file.readlines()
-        for line in lines[1:]:
-            parts = line.strip().split(';')
-            if len(parts) == 5:
-                id_venta = int(parts[0])
-                nombre_producto = parts[1]
-                cantidad_vendida = int(parts[2])
-                precio_unitario = float(parts[3])
-                fecha_venta = parts[4]
-                records.append(Record(id_venta, nombre_producto, cantidad_vendida, precio_unitario, fecha_venta))
-    return records
+    def scanAll(self):
+        print("\n--- DATA PAGES ---")
+        if not os.path.exists(self.filename):
+            print("  (no existe)")
+            return
+            
+        with open(self.filename, "rb") as file:
+            file_size = os.path.getsize(self.filename)
+            if file_size < self.DATA_START_OFFSET:
+                print("  (archivo vacío)")
+                return
+                
+            num_pages = (file_size - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+            visited = set()
+            
+            for i in range(num_pages):
+                if i in visited:
+                    continue
+                    
+                current_page_num = i
+                while current_page_num is not None and current_page_num not in visited:
+                    visited.add(current_page_num)
+                    page = self._read_page(file, current_page_num)
+                    
+                    ids = [record.id_venta for record in page.records]
+                    next_page_info = f"next_page: {page.next_page}" if page.next_page != -1 else "next_page: None"
+                    overflow_info = " (overflow)" if self._is_overflow_page(current_page_num) else " (main)"
+                    print(f"  Página {current_page_num}: IDs {ids}, {next_page_info}{overflow_info}")
+                    
+                    current_page_num = page.next_page if page.next_page != -1 else None
 
 
-if __name__ == "__main__":
-    for file in ["datos.dat", "index.dat"]:
-        if os.path.exists(file):
-            os.remove(file)
-
-    isam = ISAMFile()
-    records = load_csv_data("sales_dataset_unsorted.csv")[:30]
-
-    for record in records:
-        isam.add(record)
-
-    print("INDEX FILE:")
-    isam.show_index_structure()
-    
-    print("\nDATOS")
-    isam.scanAll()
-    
-    test_id = records[5].id_venta
-    print("\nOPERACIONES")
-
-    overflow_ids = [747, 801, 854, 871]
-    for id_del in overflow_ids:
-        isam.delete_optimized(id_del)
-        print(f"Deleted {id_del}")
-    
-    # insertar nuevos registros 
-    new_records = [
-        Record(101, "ProductoA", 5, 25.50, "2023-11-01"),
-        Record(102, "ProductoB", 3, 15.75, "2023-11-02"),
-        Record(103, "ProductoC", 8, 45.25, "2023-11-03"),
-    ]
-    
-    for record in new_records:
-        isam.add(record)
-        print(f"Inserted {record.id_venta}")
-    
-    print("\nse reuso la page 8 que fue liberada al eliminar esos 4 registros y luego insertar esos otros 3")
-    print("\nDATOS")
-    isam.scanAll()
-    
-    print("\nBUSQUEDAS")
-    test_keys = [101, 102, 103, 747, 801]
-    for key in test_keys:
-        found = isam.search(key) is not None
-        print(f"Search {key}: {'Found' if found else 'Not found'}")
-
-    print("\nELIMINACIONES EXTRAS")
-    more_deletions = [403,449]
-    for id_del in more_deletions:
-        isam.delete_optimized(id_del)
-        print(f"Deleted {id_del}")
-    
-    print("\nla page 2 queda vacia pero no se manda a free list porque es una page principal, \nademás se mantiene el index")
-    print("\nDATOS")
-    isam.scanAll()
-    print("\nINDEX FILE:")
-    isam.show_index_structure()
