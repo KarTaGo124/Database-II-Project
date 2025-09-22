@@ -1,7 +1,8 @@
 import os, struct
 
-BLOCK_FACTOR = 4  
-INDEX_BLOCK_FACTOR = 5
+BLOCK_FACTOR = 4
+ROOT_INDEX_BLOCK_FACTOR = 3
+LEAF_INDEX_BLOCK_FACTOR = 5
 
 class Record:
     FORMAT = '50sifi10s'
@@ -113,6 +114,43 @@ class Page:
         all_records.sort(key=lambda r: r.id_venta)
         self.records = all_records
     
+class RootIndexEntry:
+    FORMAT = "ii"
+    SIZE = struct.calcsize(FORMAT)
+    
+    def __init__(self, key: int, leaf_page_number: int):
+        self.key = key
+        self.leaf_page_number = leaf_page_number
+    
+    def pack(self) -> bytes:
+        return struct.pack(self.FORMAT, self.key, self.leaf_page_number)
+    
+    @staticmethod
+    def unpack(data: bytes):
+        key, leaf_page_number = struct.unpack(RootIndexEntry.FORMAT, data)
+        return RootIndexEntry(key, leaf_page_number)
+    
+    def __str__(self):
+        return f"RootKey: {self.key} -> LeafPage: {self.leaf_page_number}"
+
+class LeafIndexEntry:
+    FORMAT = "ii"
+    SIZE = struct.calcsize(FORMAT)
+    
+    def __init__(self, key: int, data_page_number: int):
+        self.key = key
+        self.data_page_number = data_page_number
+    
+    def pack(self) -> bytes:
+        return struct.pack(self.FORMAT, self.key, self.data_page_number)
+    
+    @staticmethod
+    def unpack(data: bytes):
+        key, data_page_number = struct.unpack(LeafIndexEntry.FORMAT, data)
+        return LeafIndexEntry(key, data_page_number)
+    
+    def __str__(self):
+        return f"LeafKey: {self.key} -> DataPage: {self.data_page_number}"
 
 
 class IndexPage:
