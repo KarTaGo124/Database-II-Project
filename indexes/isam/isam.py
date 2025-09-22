@@ -102,7 +102,7 @@ class Page:
     def is_empty(self):
         return len(self.records) == 0
     
-    
+
 class RootIndexEntry:
     FORMAT = "ii"
     SIZE = struct.calcsize(FORMAT)
@@ -121,6 +121,67 @@ class RootIndexEntry:
     
     def __str__(self):
         return f"RootKey: {self.key} -> LeafPage: {self.leaf_page_number}"
+
+
+class RootIndex:
+    HEADER_FORMAT = 'ii'
+    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+    SIZE_OF_ROOT_INDEX = HEADER_SIZE + ROOT_INDEX_BLOCK_FACTOR * RootIndexEntry.SIZE
+
+    def __init__(self, entries=None, next_page=-1):
+        self.entries = entries if entries else []
+        self.next_page = next_page
+
+    def pack(self):
+        header_data = struct.pack(self.HEADER_FORMAT, len(self.entries), self.next_page)
+        entries_data = b''.join(entry.pack() for entry in self.entries)
+        entries_data += b'\x00' * (RootIndexEntry.SIZE * (ROOT_INDEX_BLOCK_FACTOR - len(self.entries)))
+        return header_data + entries_data
+
+    @staticmethod
+    def unpack(data: bytes):
+        size, next_page = struct.unpack(RootIndex.HEADER_FORMAT, data[:RootIndex.HEADER_SIZE])
+        offset = RootIndex.HEADER_SIZE
+        entries = []
+        for _ in range(size):
+            entry_data = data[offset: offset + RootIndexEntry.SIZE]
+            entries.append(RootIndexEntry.unpack(entry_data))
+            offset += RootIndexEntry.SIZE
+        return RootIndex(entries, next_page)
+
+    def insert_sorted(self, entry):
+        left, right = 0, len(self.entries)
+        while left < right:
+            mid = (left + right) // 2
+            if self.entries[mid].key < entry.key:
+                left = mid + 1
+            else:
+                right = mid
+        self.entries.insert(left, entry)
+
+    def is_full(self):
+        return len(self.entries) >= ROOT_INDEX_BLOCK_FACTOR
+
+    def find_leaf_page_for_key(self, key):
+        if not self.entries:
+            return 0
+        
+        left = 0
+        right = len(self.entries) - 1
+        result_page = 0 
+        
+        while left <= right:
+            mid = (left + right) // 2
+            mid_key = self.entries[mid].key
+            
+            if key < mid_key:
+                right = mid - 1
+            elif key >= mid_key:
+                result_page = self.entries[mid].leaf_page_number
+                left = mid + 1
+            
+        return result_page
+
 
 class LeafIndexEntry:
     FORMAT = "ii"
@@ -142,30 +203,10 @@ class LeafIndexEntry:
         return f"LeafKey: {self.key} -> DataPage: {self.data_page_number}"
 
 
-class IndexPage:
-    FORMAT = "ii"
-    SIZE = struct.calcsize(FORMAT)
-    
-    def __init__(self, key: int, page_number: int):
-        self.key = key
-        self.page_number = page_number
-    
-    def pack(self) -> bytes:
-        return struct.pack(self.FORMAT, self.key, self.page_number)
-    
-    @staticmethod
-    def unpack(data: bytes):
-        key, page_number = struct.unpack(IndexPage.FORMAT, data)
-        return IndexPage(key, page_number)
-    
-    def __str__(self):
-        return f"Key: {self.key} -> Page: {self.page_number}"
-
-
-class IndexFile:
+class LeafIndex:
     HEADER_FORMAT = 'ii'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    SIZE_OF_INDEX_FILE = HEADER_SIZE + INDEX_BLOCK_FACTOR * IndexPage.SIZE
+    SIZE_OF_LEAF_INDEX = HEADER_SIZE + LEAF_INDEX_BLOCK_FACTOR * LeafIndexEntry.SIZE
 
     def __init__(self, entries=None, next_page=-1):
         self.entries = entries if entries else []
@@ -174,19 +215,19 @@ class IndexFile:
     def pack(self):
         header_data = struct.pack(self.HEADER_FORMAT, len(self.entries), self.next_page)
         entries_data = b''.join(entry.pack() for entry in self.entries)
-        entries_data += b'\x00' * (IndexPage.SIZE * (INDEX_BLOCK_FACTOR - len(self.entries)))
+        entries_data += b'\x00' * (LeafIndexEntry.SIZE * (LEAF_INDEX_BLOCK_FACTOR - len(self.entries)))
         return header_data + entries_data
 
     @staticmethod
     def unpack(data: bytes):
-        size, next_page = struct.unpack(IndexFile.HEADER_FORMAT, data[:IndexFile.HEADER_SIZE])
-        offset = IndexFile.HEADER_SIZE
+        size, next_page = struct.unpack(LeafIndex.HEADER_FORMAT, data[:LeafIndex.HEADER_SIZE])
+        offset = LeafIndex.HEADER_SIZE
         entries = []
         for _ in range(size):
-            entry_data = data[offset: offset + IndexPage.SIZE]
-            entries.append(IndexPage.unpack(entry_data))
-            offset += IndexPage.SIZE
-        return IndexFile(entries, next_page)
+            entry_data = data[offset: offset + LeafIndexEntry.SIZE]
+            entries.append(LeafIndexEntry.unpack(entry_data))
+            offset += LeafIndexEntry.SIZE
+        return LeafIndex(entries, next_page)
 
     def insert_sorted(self, entry):
         left, right = 0, len(self.entries)
@@ -199,10 +240,9 @@ class IndexFile:
         self.entries.insert(left, entry)
 
     def is_full(self):
-        return len(self.entries) >= INDEX_BLOCK_FACTOR
+        return len(self.entries) >= LEAF_INDEX_BLOCK_FACTOR
 
-    # Encuentra la target page en donde debería estar cierta key
-    def find_page_for_key(self, key):
+    def find_data_page_for_key(self, key):
         if not self.entries:
             return 0
         
@@ -217,7 +257,7 @@ class IndexFile:
             if key < mid_key:
                 right = mid - 1
             elif key >= mid_key:
-                result_page = self.entries[mid].page_number
+                result_page = self.entries[mid].data_page_number
                 left = mid + 1
             
         return result_page
