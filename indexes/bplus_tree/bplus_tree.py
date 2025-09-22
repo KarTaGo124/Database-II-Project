@@ -1,43 +1,35 @@
-import csv
-import os
-import struct
-from typing import List
+from Record import Record, TableMetadata
 
-class TableMetadata:
-    def __init__(self, table_name: str, list_of_types: List[List[str, str, int]], key_field: str):
-        self.table_name = table_name
-        self.list_of_types = list_of_types
-        self.key_field = key_field
-        self.record = Record(list_of_types, key_field)
-        self.record_size = self.record.RECORD_SIZE + 1 # +1 por el campo active
+class BPlusTreeUnclusteredIndex:
+    def __init__(self, table_metadata: TableMetadata, index_column: str):
+        self.index_column = index_column
+        self.root = None  # Root node of the B+ tree
+        self.order = 4  # Maximum number of children for internal nodes
+
+class Node:
+    def __init__(self, is_leaf: bool):
+        self.is_leaf = is_leaf
+        self.keys = []
+        self.parent = None  # Parent node
+        self.id = None  # Unique identifier for the node (e.g., page number)
     
-class Record:
-    FORMAT = ""
-    RECORD_SIZE = 0
-    key_field = "" # clave para el ordenamiento
-    value_type_size = [] # es una tupla de 3 de (nombrevariable, tipo, size) para cada campo
-
-    def __init__(self, list_of_types: List[List[str, str, int]], key_fieldd: str):
-        self.FORMAT = making_format(list_of_types)
-        self.RECORD_SIZE = struct.calcsize(self.FORMAT)
-        self.value_type_size = [(element[0], element[1], element[2]) for element in list_of_types]
-        self.key_field = key_fieldd
-        self.active = True
-
-    def pack(self) -> bytes:
-        procesados = []
-        for item in self.value_type_size:
-            valor = getattr(self, item[0])
-            procesados.append(procesar_dato(valor, item[1],item[2]))
-
-        procesados.append(self.active)
-        format_with_active = self.FORMAT + "?"
-        return struct.pack(format_with_active, *procesados)
-
-    @staticmethod
-    def unpack(data):
-        fields = struct.unpack(Record.FORMAT, data)
-        return Record() # mori falta hacer esto bien
     
-    def get_key(self):
-        return getattr(self, self.key_field) #retorna dinamicamente el valor del campo clave
+
+class LeafNode(Node):
+    def __init__(self, is_leaf):
+        super().__init__()
+        self.children = []  # List of RecordPointer objects
+
+
+
+class InternalNode(Node):
+    def __init__(self, is_leaf):
+        super().__init__()
+        self.children = []  # Pointers to child nodes
+
+class RecordPointer:
+    def __init__(self, page_number: int, slot_number: int):
+        self.page_number = page_number
+        self.slot_number = slot_number
+
+
