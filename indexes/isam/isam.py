@@ -263,6 +263,72 @@ class LeafIndex:
         return result_page
 
 
+class FreeListStack:
+    def __init__(self, free_list_file="free_list.dat"):
+        self.free_list_file = free_list_file
+
+    def push_free_page(self, page_num):
+        try:
+            if not os.path.exists(self.free_list_file):
+                count = 0
+            else:
+                with open(self.free_list_file, "rb") as file:
+                    count_data = file.read(4)
+                    count = struct.unpack('i', count_data)[0] if count_data else 0
+
+            with open(self.free_list_file, "r+b" if count > 0 else "wb") as file:
+                file.seek(0)
+                file.write(struct.pack('i', count + 1))
+                file.seek(0, 2)
+                file.write(struct.pack('i', page_num))
+            return True
+        except:
+            return False
+    
+    def pop_free_page(self):
+        if not os.path.exists(self.free_list_file):
+            return None
+
+        try:
+            with open(self.free_list_file, "r+b") as file:
+                count_data = file.read(4)
+                if len(count_data) < 4:
+                    return None
+
+                count = struct.unpack('i', count_data)[0]
+                if count <= 0:
+                    return None
+
+                file.seek(4 + (count - 1) * 4)
+                page_num = struct.unpack('i', file.read(4))[0]
+
+                file.seek(0)
+                file.write(struct.pack('i', count - 1))
+
+                return page_num
+        except:
+            return None
+    
+    def get_free_count(self):
+        if not os.path.exists(self.free_list_file):
+            return 0
+
+        try:
+            with open(self.free_list_file, "rb") as file:
+                count_data = file.read(4)
+                return struct.unpack('i', count_data)[0] if count_data else 0
+        except:
+            return 0
+    
+    def clear(self):
+        if os.path.exists(self.free_list_file):
+            os.remove(self.free_list_file)
+    
+    def is_empty(self):
+        return self.get_free_count() == 0
+
+
+
 class ISAMFile:
     HEADER_FORMAT = 'i'  # contador de páginas libres
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
