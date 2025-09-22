@@ -1,0 +1,50 @@
+?start: stmt ";"+
+      | stmt
+
+
+?stmt: create_table
+     | create_from_file
+     | select_stmt
+     | insert_stmt
+     | delete_stmt
+
+create_table: "CREATE" "TABLE" IDENT "(" coldef ("," coldef)* ")"
+coldef: IDENT type_spec ["KEY"] ["INDEX" index_kind]
+
+type_spec: "INT"        -> t_int
+         | "FLOAT"      -> t_float
+         | "DATE"       -> t_date
+         | "VARCHAR" "[" INT "]" -> t_varchar
+         | "ARRAY" "[" "FLOAT" "]" -> t_array
+
+index_kind: "SEQ" | "ISAM" | "BTREE" | "RTREE" | "EXTENDIBLE"
+
+create_from_file: "CREATE" "TABLE" IDENT "FROM" "FILE" STRING "USING" "INDEX" index_kind "(" (IDENT | "(" IDENT "," IDENT ")") ")"
+
+select_stmt: "SELECT" "*" "FROM" IDENT ["WHERE" predicate]
+
+?predicate: IDENT "=" literal                   -> pred_eq
+          | IDENT "BETWEEN" literal "AND" literal -> pred_between
+          | IDENT "IN" "(" point "," number ")"    -> pred_in
+          | IDENT "NEAREST" "(" point "," INT ")"  -> pred_nearest
+
+insert_stmt: "INSERT" "INTO" IDENT "VALUES" "(" literal ("," literal)* ")"
+delete_stmt: "DELETE" "FROM" IDENT "WHERE" predicate
+
+point: "(" number "," number ")"
+number: SIGNED_INT -> int_lit
+      | SIGNED_FLOAT -> float_lit
+
+%import common.SIGNED_INT
+%import common.SIGNED_FLOAT
+
+
+literal: number
+       | STRING
+
+%import common.CNAME -> IDENT
+%import common.INT
+%import common.FLOAT
+%import common.ESCAPED_STRING -> STRING
+%import common.WS
+%ignore WS
