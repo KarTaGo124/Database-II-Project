@@ -1,8 +1,8 @@
 import os, struct
 
 BLOCK_FACTOR = 10
-ROOT_INDEX_BLOCK_FACTOR = 5
-LEAF_INDEX_BLOCK_FACTOR = 8
+ROOT_INDEX_BLOCK_FACTOR = 8
+LEAF_INDEX_BLOCK_FACTOR = 12
 CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
 class Record:
@@ -434,10 +434,54 @@ class ISAMFile:
     def _find_target_leaf_page(self, id_venta):
         if not os.path.exists(self.root_index_file):
             return 0
-        
+
         with open(self.root_index_file, "rb") as file:
             root_index = self._read_root_index(file, 0)
             return root_index.find_leaf_page_for_key(id_venta)
+
+    def _find_leaf_page_range_for_keys(self, begin_key, end_key):
+        if not os.path.exists(self.root_index_file) or not os.path.exists(self.leaf_index_file):
+            return 0, 0
+
+        with open(self.root_index_file, "rb") as root_file:
+            root_index = self._read_root_index(root_file, 0)
+
+            if not root_index.entries:
+                return 0, 0
+
+            start_leaf = 0
+            end_leaf = 0
+
+            with open(self.leaf_index_file, "rb") as leaf_file:
+                file_size = os.path.getsize(self.leaf_index_file)
+                leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+                num_leaf_pages = file_size // leaf_size
+
+                for i in range(num_leaf_pages):
+                    leaf_index = self._read_leaf_index(leaf_file, i)
+                    if not leaf_index.entries:
+                        continue
+
+                    min_key = leaf_index.entries[0].key
+                    max_key = leaf_index.entries[-1].key
+
+                    if max_key >= begin_key:
+                        start_leaf = i
+                        break
+
+                for i in range(num_leaf_pages - 1, -1, -1):
+                    leaf_index = self._read_leaf_index(leaf_file, i)
+                    if not leaf_index.entries:
+                        continue
+
+                    min_key = leaf_index.entries[0].key
+                    max_key = leaf_index.entries[-1].key
+
+                    if min_key <= end_key:
+                        end_leaf = i
+                        break
+
+            return start_leaf, end_leaf
 
     def _find_target_data_page(self, id_venta, leaf_page_num):
         if not os.path.exists(self.leaf_index_file):
@@ -743,84 +787,50 @@ class ISAMFile:
     def range_search(self, begin_key, end_key):
         results = []
 
-        if not os.path.exists(self.filename):
+        if not os.path.exists(self.filename) or begin_key > end_key:
             return results
 
-        # Usar índices para encontrar punto de inicio
-        start_leaf_page = self._find_target_leaf_page(begin_key)
-        start_data_page = self._find_target_data_page(begin_key, start_leaf_page)
+        start_leaf, end_leaf = self._find_leaf_page_range_for_keys(begin_key, end_key)
 
-        with open(self.filename, "rb") as file:
-            file_size = os.path.getsize(self.filename)
-            if file_size < self.DATA_START_OFFSET:
-                return results
+        with open(self.filename, "rb") as data_file:
+            with open(self.leaf_index_file, "rb") as leaf_file:
+                visited_pages = set()
 
-            visited_pages = set()
-
-            # Comenzar desde la página encontrada por los índices
-            current_page_num = start_data_page
-
-            while current_page_num is not None and current_page_num not in visited_pages:
-                visited_pages.add(current_page_num)
-                page = self._read_page(file, current_page_num)
-
-                for record in page.records:
-                    if record.id_venta > end_key:
-                        # Si encontramos un registro mayor al final del rango, terminamos
-                        return sorted(results, key=lambda r: r.id_venta)
-                    if begin_key <= record.id_venta <= end_key:
-                        results.append(record)
-
-                # Continuar con overflow pages
-                current_page_num = page.next_page if page.next_page != -1 else None
-
-            # Si no encontramos registros en el rango de inicio, buscar en páginas siguientes
-            if not results and os.path.exists(self.leaf_index_file):
-                self._continue_range_search_in_next_pages(begin_key, end_key, start_leaf_page, visited_pages, results)
-
-        return sorted(results, key=lambda r: r.id_venta)
-
-    def _continue_range_search_in_next_pages(self, begin_key, end_key, start_leaf_page, visited_pages, results):
-        with open(self.leaf_index_file, "rb") as leaf_file:
-            file_size = os.path.getsize(self.leaf_index_file)
-            leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
-            num_leaf_pages = file_size // leaf_size
-
-            with open(self.filename, "rb") as data_file:
-                # Buscar en las siguientes páginas de datos desde el leaf index actual
-                for leaf_page_num in range(start_leaf_page, num_leaf_pages):
+                for leaf_page_num in range(start_leaf, end_leaf + 1):
                     leaf_index = self._read_leaf_index(leaf_file, leaf_page_num)
 
                     for entry in leaf_index.entries:
                         if entry.key > end_key:
-                            return  # Ya pasamos el rango
+                            break
 
-                        if entry.data_page_number not in visited_pages:
-                            current_page_num = entry.data_page_number
+                        current_page_num = entry.data_page_number
 
-                            while current_page_num is not None and current_page_num not in visited_pages:
-                                visited_pages.add(current_page_num)
-                                page = self._read_page(data_file, current_page_num)
+                        while current_page_num is not None and current_page_num not in visited_pages:
+                            visited_pages.add(current_page_num)
+                            page = self._read_page(data_file, current_page_num)
 
-                                for record in page.records:
-                                    if record.id_venta > end_key:
-                                        return
-                                    if begin_key <= record.id_venta <= end_key:
-                                        results.append(record)
+                            for record in page.records:
+                                if record.id_venta > end_key:
+                                    break
+                                if begin_key <= record.id_venta <= end_key:
+                                    results.append(record)
 
-                                current_page_num = page.next_page if page.next_page != -1 else None
+                            current_page_num = page.next_page if page.next_page != -1 else None
+
+        return sorted(results, key=lambda r: r.id_venta)
 
     # Funciones extras
 
     def _is_overflow_page(self, page_num):
         if not os.path.exists(self.leaf_index_file):
             return page_num > 0
-        
+
         try:
             with open(self.leaf_index_file, "rb") as file:
                 file_size = os.path.getsize(self.leaf_index_file)
-                num_leaf_pages = file_size // LeafIndex.SIZE_OF_LEAF_INDEX
-                
+                leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+                num_leaf_pages = file_size // leaf_size
+
                 for i in range(num_leaf_pages):
                     leaf_index = self._read_leaf_index(file, i)
                     for entry in leaf_index.entries:
@@ -878,6 +888,66 @@ class ISAMFile:
             errors.append(f"Error durante validación: {str(e)}")
         
         return errors
+
+    def rebuild(self):
+        all_records = self._extract_all_records()
+
+        old_files = [self.filename, self.root_index_file, self.leaf_index_file]
+        backup_files = [f + ".backup" for f in old_files]
+
+        for old, backup in zip(old_files, backup_files):
+            if os.path.exists(old):
+                os.rename(old, backup)
+
+        new_root_factor = int(self.root_index_block_factor * 1.5)
+        new_leaf_factor = int(self.leaf_index_block_factor * 1.5)
+        new_block_factor = int(self.block_factor * 1.3)
+
+        self.root_index_block_factor = new_root_factor
+        self.leaf_index_block_factor = new_leaf_factor
+        self.block_factor = new_block_factor
+        self.consolidation_threshold = new_block_factor // 3
+
+        self.free_list_stack.clear()
+        self.next_page_number = 0
+        self.next_root_index_page_number = 0
+        self.next_leaf_index_page_number = 0
+
+        for record in all_records:
+            self.add(record)
+
+        for backup in backup_files:
+            if os.path.exists(backup):
+                os.remove(backup)
+
+    def _extract_all_records(self):
+        all_records = []
+        if not os.path.exists(self.filename):
+            return all_records
+
+        with open(self.filename, "rb") as file:
+            file_size = os.path.getsize(self.filename)
+            if file_size < self.DATA_START_OFFSET:
+                return all_records
+
+            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+            num_pages = (file_size - self.DATA_START_OFFSET) // page_size
+            visited = set()
+
+            for i in range(num_pages):
+                if i in visited:
+                    continue
+
+                current_page_num = i
+                while current_page_num is not None and current_page_num not in visited:
+                    visited.add(current_page_num)
+                    page = self._read_page(file, current_page_num)
+
+                    all_records.extend(page.records)
+                    current_page_num = page.next_page if page.next_page != -1 else None
+
+        all_records.sort(key=lambda r: r.id_venta)
+        return all_records
 
     def show_structure(self):
         print("=== ESTRUCTURA DEL ISAM DE DOS NIVELES ===")
