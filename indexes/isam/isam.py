@@ -1,8 +1,9 @@
 import os, struct
 
-BLOCK_FACTOR = 4
-ROOT_INDEX_BLOCK_FACTOR = 3
-LEAF_INDEX_BLOCK_FACTOR = 5
+BLOCK_FACTOR = 10
+ROOT_INDEX_BLOCK_FACTOR = 5
+LEAF_INDEX_BLOCK_FACTOR = 8
+CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
 class Record:
     FORMAT = '50sifi10s'
@@ -344,11 +345,18 @@ class ISAMFile:
     
     # Inicialización
 
-    def __init__(self, filename="datos.dat", root_index_file="root_index.dat", leaf_index_file="leaf_index.dat", free_list_file="free_list.dat"):
+    def __init__(self, filename="datos.dat", root_index_file="root_index.dat", leaf_index_file="leaf_index.dat", free_list_file="free_list.dat",
+                 block_factor=None, root_index_block_factor=None, leaf_index_block_factor=None, consolidation_threshold=None):
         self.filename = filename
         self.root_index_file = root_index_file
         self.leaf_index_file = leaf_index_file
         self.free_list_stack = FreeListStack(free_list_file)
+
+        self.block_factor = block_factor if block_factor is not None else BLOCK_FACTOR
+        self.root_index_block_factor = root_index_block_factor if root_index_block_factor is not None else ROOT_INDEX_BLOCK_FACTOR
+        self.leaf_index_block_factor = leaf_index_block_factor if leaf_index_block_factor is not None else LEAF_INDEX_BLOCK_FACTOR
+        self.consolidation_threshold = consolidation_threshold if consolidation_threshold is not None else CONSOLIDATION_THRESHOLD
+
         self.next_page_number = 0
         self.next_root_index_page_number = 0
         self.next_leaf_index_page_number = 0
@@ -452,21 +460,23 @@ class ISAMFile:
     def _split_page_strategy(self, file, page_num, page, new_record, leaf_page_num):
         all_records = page.records + [new_record]
         all_records.sort(key=lambda r: r.id_venta)
-        
+
         mid_point = len(all_records) // 2
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
-        
+
         left_page = Page(left_records)
         self._write_page(file, page_num, left_page)
-        
+
         file.seek(0, 2)
         new_page_num = (file.tell() - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
         right_page = Page(right_records)
         file.write(right_page.pack())
-        
+
         separator_key = right_records[0].id_venta
-        self._update_leaf_index_with_new_page(separator_key, new_page_num, leaf_page_num)
+
+        # Actualizar índice: 1) nueva entrada para página derecha, 2) actualizar entrada de página izquierda
+        self._update_leaf_index_after_split(separator_key, new_page_num, page_num, left_records[0].id_venta, leaf_page_num)
         self.next_page_number = new_page_num + 1
 
     def _split_leaf_index_strategy(self, file, page_num, page, new_record, leaf_page_num):
@@ -504,14 +514,20 @@ class ISAMFile:
         mid_point = len(overloaded_leaf_index.entries) // 2
         left_entries = overloaded_leaf_index.entries[:mid_point]
         right_entries = overloaded_leaf_index.entries[mid_point:]
-        
-        left_leaf_index = LeafIndex(left_entries, overloaded_leaf_index.next_page)
-        self._write_leaf_index(leaf_index_file, leaf_page_num, left_leaf_index)
-        
+
+        # Calcular nueva página antes de escribir
         leaf_index_file.seek(0, 2)
         new_leaf_page_num = leaf_index_file.tell() // LeafIndex.SIZE_OF_LEAF_INDEX
-        right_leaf_index = LeafIndex(right_entries)
-        leaf_index_file.write(right_leaf_index.pack())
+
+        # El lado izquierdo apunta al nuevo lado derecho
+        left_leaf_index = LeafIndex(left_entries, new_leaf_page_num)
+        self._write_leaf_index(leaf_index_file, leaf_page_num, left_leaf_index)
+
+        # El lado derecho mantiene el next_page original
+        right_leaf_index = LeafIndex(right_entries, overloaded_leaf_index.next_page)
+        self._write_leaf_index(leaf_index_file, new_leaf_page_num, right_leaf_index)
+
+        self.next_leaf_index_page_number = new_leaf_page_num + 1
         
         separator_key = right_entries[0].key
         self._update_root_index_with_new_page(separator_key, new_leaf_page_num)
@@ -553,6 +569,25 @@ class ISAMFile:
         
         return start_page_num, None, True
 
+    def _update_leaf_index_after_split(self, right_key, right_page_num, left_page_num, left_key, leaf_page_num):
+        with open(self.leaf_index_file, "r+b") as file:
+            leaf_index = self._read_leaf_index(file, leaf_page_num)
+
+            # 1. Encontrar y actualizar la entrada que apunta a la página izquierda
+            for entry in leaf_index.entries:
+                if entry.data_page_number == left_page_num:
+                    entry.key = left_key
+                    break
+
+            # 2. Agregar nueva entrada para la página derecha
+            new_entry = LeafIndexEntry(right_key, right_page_num)
+            leaf_index.insert_sorted(new_entry)
+
+            if len(leaf_index.entries) > LEAF_INDEX_BLOCK_FACTOR:
+                self._split_leaf_index_page(file, leaf_page_num, leaf_index)
+            else:
+                self._write_leaf_index(file, leaf_page_num, leaf_index)
+
     def _update_leaf_index_with_new_page(self, key, page_num, leaf_page_num):
         with open(self.leaf_index_file, "r+b") as file:
             leaf_index = self._read_leaf_index(file, leaf_page_num)
@@ -587,7 +622,7 @@ class ISAMFile:
                 if len(page.records) == 0 and self._is_overflow_page(current_page_num):
                     self._remove_page_from_chain(file, start_page_num, current_page_num)
                     self.free_list_stack.push_free_page(current_page_num)
-                elif len(page.records) <= BLOCK_FACTOR // 3:
+                elif len(page.records) <= CONSOLIDATION_THRESHOLD:
                     self._try_consolidate_page(file, current_page_num)
                 
                 return True
@@ -639,12 +674,11 @@ class ISAMFile:
             return
 
         target_leaf_page_num = self._find_target_leaf_page(record.id_venta)
-        
         target_data_page_num = self._find_target_data_page(record.id_venta, target_leaf_page_num)
-        
+
         with open(self.filename, "r+b") as file:
             page = self._read_page(file, target_data_page_num)
-            
+
             if not page.is_full():
                 page.insert_sorted(record)
                 self._write_page(file, target_data_page_num, page)
@@ -654,12 +688,13 @@ class ISAMFile:
     def search(self, id_venta):
         if not os.path.exists(self.filename):
             return None
-        
+
         target_leaf_page_num = self._find_target_leaf_page(id_venta)
         target_data_page_num = self._find_target_data_page(id_venta, target_leaf_page_num)
+
         with open(self.filename, "rb") as file:
             current_page_num = target_data_page_num
-            
+
             while current_page_num != -1:
                 page = self._read_page(file, current_page_num)
 
@@ -667,10 +702,10 @@ class ISAMFile:
                     if record.id_venta == id_venta:
                         return record
                     elif record.id_venta > id_venta:
-                        break
+                        return None
 
                 current_page_num = page.next_page if page.next_page != -1 else -1
-            
+
             return None
 
     def delete(self, id_venta):
@@ -686,7 +721,7 @@ class ISAMFile:
             if page.remove_record(id_venta):
                 self._write_page(file, target_data_page_num, page)
                 
-                if len(page.records) <= BLOCK_FACTOR // 3:
+                if len(page.records) <= CONSOLIDATION_THRESHOLD:
                     self._try_consolidate_page(file, target_data_page_num)
                 
                 return True
@@ -699,31 +734,68 @@ class ISAMFile:
         if not os.path.exists(self.filename):
             return results
 
+        # Usar índices para encontrar punto de inicio
+        start_leaf_page = self._find_target_leaf_page(begin_key)
+        start_data_page = self._find_target_data_page(begin_key, start_leaf_page)
+
         with open(self.filename, "rb") as file:
             file_size = os.path.getsize(self.filename)
             if file_size < self.DATA_START_OFFSET:
                 return results
 
-            num_pages = (file_size - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
             visited_pages = set()
 
-            for page_num in range(num_pages):
-                if page_num in visited_pages:
-                    continue
+            # Comenzar desde la página encontrada por los índices
+            current_page_num = start_data_page
 
-                current_page_num = page_num
-                while current_page_num is not None and current_page_num not in visited_pages:
-                    visited_pages.add(current_page_num)
-                    page = self._read_page(file, current_page_num)
+            while current_page_num is not None and current_page_num not in visited_pages:
+                visited_pages.add(current_page_num)
+                page = self._read_page(file, current_page_num)
 
-                    for record in page.records:
-                        if begin_key <= record.id_venta <= end_key:
-                            results.append(record)
+                for record in page.records:
+                    if record.id_venta > end_key:
+                        # Si encontramos un registro mayor al final del rango, terminamos
+                        return sorted(results, key=lambda r: r.id_venta)
+                    if begin_key <= record.id_venta <= end_key:
+                        results.append(record)
 
-                    current_page_num = page.next_page if page.next_page != -1 else None
+                # Continuar con overflow pages
+                current_page_num = page.next_page if page.next_page != -1 else None
 
-        results.sort(key=lambda r: r.id_venta)
-        return results
+            # Si no encontramos registros en el rango de inicio, buscar en páginas siguientes
+            if not results and os.path.exists(self.leaf_index_file):
+                self._continue_range_search_in_next_pages(begin_key, end_key, start_leaf_page, visited_pages, results)
+
+        return sorted(results, key=lambda r: r.id_venta)
+
+    def _continue_range_search_in_next_pages(self, begin_key, end_key, start_leaf_page, visited_pages, results):
+        with open(self.leaf_index_file, "rb") as leaf_file:
+            file_size = os.path.getsize(self.leaf_index_file)
+            num_leaf_pages = file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+
+            with open(self.filename, "rb") as data_file:
+                # Buscar en las siguientes páginas de datos desde el leaf index actual
+                for leaf_page_num in range(start_leaf_page, num_leaf_pages):
+                    leaf_index = self._read_leaf_index(leaf_file, leaf_page_num)
+
+                    for entry in leaf_index.entries:
+                        if entry.key > end_key:
+                            return  # Ya pasamos el rango
+
+                        if entry.data_page_number not in visited_pages:
+                            current_page_num = entry.data_page_number
+
+                            while current_page_num is not None and current_page_num not in visited_pages:
+                                visited_pages.add(current_page_num)
+                                page = self._read_page(data_file, current_page_num)
+
+                                for record in page.records:
+                                    if record.id_venta > end_key:
+                                        return
+                                    if begin_key <= record.id_venta <= end_key:
+                                        results.append(record)
+
+                                current_page_num = page.next_page if page.next_page != -1 else None
 
     # Funciones extras
 
