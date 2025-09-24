@@ -37,20 +37,20 @@ class Record:
 class Page:
     HEADER_FORMAT = 'ii'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    SIZE_OF_PAGE = HEADER_SIZE + BLOCK_FACTOR * Record.SIZE_OF_RECORD
-
-    def __init__(self, records=None, next_page=-1):
+    def __init__(self, records=None, next_page=-1, block_factor=BLOCK_FACTOR):
         self.records = records if records else []
         self.next_page = next_page
+        self.block_factor = block_factor
+        self.SIZE_OF_PAGE = self.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
 
     def pack(self):
         header_data = struct.pack(self.HEADER_FORMAT, len(self.records), self.next_page)
         record_data = b''.join(r.pack() for r in self.records)
-        record_data += b'\x00' * (Record.SIZE_OF_RECORD * (BLOCK_FACTOR - len(self.records)))
+        record_data += b'\x00' * (Record.SIZE_OF_RECORD * (self.block_factor - len(self.records)))
         return header_data + record_data
 
     @staticmethod
-    def unpack(data: bytes): 
+    def unpack(data: bytes, block_factor=BLOCK_FACTOR):
         size, next_page = struct.unpack(Page.HEADER_FORMAT, data[:Page.HEADER_SIZE])
         offset = Page.HEADER_SIZE
         records = []
@@ -58,7 +58,7 @@ class Page:
             record_data = data[offset: offset + Record.SIZE_OF_RECORD]
             records.append(Record.unpack(record_data))
             offset += Record.SIZE_OF_RECORD
-        return Page(records, next_page)
+        return Page(records, next_page, block_factor)
     
     def insert_sorted(self, record):
         left, right = 0, len(self.records)
@@ -71,7 +71,7 @@ class Page:
         self.records.insert(left, record)
 
     def is_full(self):
-        return len(self.records) >= BLOCK_FACTOR
+        return len(self.records) >= self.block_factor
     
     def remove_record(self, id_venta):
         original_count = len(self.records)
@@ -105,7 +105,7 @@ class Page:
         return len(self.records) == 0
     
     def can_merge_with(self, other_page):
-        return len(self.records) + len(other_page.records) <= BLOCK_FACTOR
+        return len(self.records) + len(other_page.records) <= self.block_factor
     
     def merge_with(self, other_page):
         all_records = self.records + other_page.records
@@ -136,20 +136,21 @@ class RootIndexEntry:
 class RootIndex:
     HEADER_FORMAT = 'ii'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    SIZE_OF_ROOT_INDEX = HEADER_SIZE + ROOT_INDEX_BLOCK_FACTOR * RootIndexEntry.SIZE
 
-    def __init__(self, entries=None, next_page=-1):
+    def __init__(self, entries=None, next_page=-1, root_index_block_factor=ROOT_INDEX_BLOCK_FACTOR):
         self.entries = entries if entries else []
         self.next_page = next_page
+        self.root_index_block_factor = root_index_block_factor
+        self.SIZE_OF_ROOT_INDEX = self.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE
 
     def pack(self):
         header_data = struct.pack(self.HEADER_FORMAT, len(self.entries), self.next_page)
         entries_data = b''.join(entry.pack() for entry in self.entries)
-        entries_data += b'\x00' * (RootIndexEntry.SIZE * (ROOT_INDEX_BLOCK_FACTOR - len(self.entries)))
+        entries_data += b'\x00' * (RootIndexEntry.SIZE * (self.root_index_block_factor - len(self.entries)))
         return header_data + entries_data
 
     @staticmethod
-    def unpack(data: bytes):
+    def unpack(data: bytes, root_index_block_factor=ROOT_INDEX_BLOCK_FACTOR):
         size, next_page = struct.unpack(RootIndex.HEADER_FORMAT, data[:RootIndex.HEADER_SIZE])
         offset = RootIndex.HEADER_SIZE
         entries = []
@@ -157,7 +158,7 @@ class RootIndex:
             entry_data = data[offset: offset + RootIndexEntry.SIZE]
             entries.append(RootIndexEntry.unpack(entry_data))
             offset += RootIndexEntry.SIZE
-        return RootIndex(entries, next_page)
+        return RootIndex(entries, next_page, root_index_block_factor)
 
     def insert_sorted(self, entry):
         left, right = 0, len(self.entries)
@@ -170,7 +171,7 @@ class RootIndex:
         self.entries.insert(left, entry)
 
     def is_full(self):
-        return len(self.entries) >= ROOT_INDEX_BLOCK_FACTOR
+        return len(self.entries) >= self.root_index_block_factor
 
     def find_leaf_page_for_key(self, key):
         if not self.entries:
@@ -216,20 +217,21 @@ class LeafIndexEntry:
 class LeafIndex:
     HEADER_FORMAT = 'ii'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    SIZE_OF_LEAF_INDEX = HEADER_SIZE + LEAF_INDEX_BLOCK_FACTOR * LeafIndexEntry.SIZE
 
-    def __init__(self, entries=None, next_page=-1):
+    def __init__(self, entries=None, next_page=-1, leaf_index_block_factor=LEAF_INDEX_BLOCK_FACTOR):
         self.entries = entries if entries else []
         self.next_page = next_page
+        self.leaf_index_block_factor = leaf_index_block_factor
+        self.SIZE_OF_LEAF_INDEX = self.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
 
     def pack(self):
         header_data = struct.pack(self.HEADER_FORMAT, len(self.entries), self.next_page)
         entries_data = b''.join(entry.pack() for entry in self.entries)
-        entries_data += b'\x00' * (LeafIndexEntry.SIZE * (LEAF_INDEX_BLOCK_FACTOR - len(self.entries)))
+        entries_data += b'\x00' * (LeafIndexEntry.SIZE * (self.leaf_index_block_factor - len(self.entries)))
         return header_data + entries_data
 
     @staticmethod
-    def unpack(data: bytes):
+    def unpack(data: bytes, leaf_index_block_factor=LEAF_INDEX_BLOCK_FACTOR):
         size, next_page = struct.unpack(LeafIndex.HEADER_FORMAT, data[:LeafIndex.HEADER_SIZE])
         offset = LeafIndex.HEADER_SIZE
         entries = []
@@ -237,7 +239,7 @@ class LeafIndex:
             entry_data = data[offset: offset + LeafIndexEntry.SIZE]
             entries.append(LeafIndexEntry.unpack(entry_data))
             offset += LeafIndexEntry.SIZE
-        return LeafIndex(entries, next_page)
+        return LeafIndex(entries, next_page, leaf_index_block_factor)
 
     def insert_sorted(self, entry):
         left, right = 0, len(self.entries)
@@ -250,7 +252,7 @@ class LeafIndex:
         self.entries.insert(left, entry)
 
     def is_full(self):
-        return len(self.entries) >= LEAF_INDEX_BLOCK_FACTOR
+        return len(self.entries) >= self.leaf_index_block_factor
 
     def find_data_page_for_key(self, key):
         if not self.entries:
@@ -364,16 +366,16 @@ class ISAMFile:
     def _create_initial_files(self, record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 0))
-            page = Page([record])
+            page = Page([record], block_factor=self.block_factor)
             file.write(page.pack())
 
         with open(self.leaf_index_file, "wb") as file:
             initial_entry = LeafIndexEntry(record.id_venta, 0)
-            leaf_index = LeafIndex([initial_entry])
+            leaf_index = LeafIndex([initial_entry], leaf_index_block_factor=self.leaf_index_block_factor)
             file.write(leaf_index.pack())
 
         with open(self.root_index_file, "wb") as file:
-            root_index = RootIndex([])
+            root_index = RootIndex([], root_index_block_factor=self.root_index_block_factor)
             file.write(root_index.pack())
         
         self.free_list_stack.clear()
@@ -396,29 +398,35 @@ class ISAMFile:
     # Escritura y lectura de páginas e índices
     
     def _read_page(self, file, page_num):
-        offset = self.DATA_START_OFFSET + (page_num * Page.SIZE_OF_PAGE)
+        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
-        return Page.unpack(file.read(Page.SIZE_OF_PAGE))
+        return Page.unpack(file.read(page_size), self.block_factor)
 
     def _write_page(self, file, page_num, page):
-        offset = self.DATA_START_OFFSET + (page_num * Page.SIZE_OF_PAGE)
+        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
         file.write(page.pack())
 
     def _read_root_index(self, file, page_num):
-        file.seek(page_num * RootIndex.SIZE_OF_ROOT_INDEX)
-        return RootIndex.unpack(file.read(RootIndex.SIZE_OF_ROOT_INDEX))
+        root_size = RootIndex.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE
+        file.seek(page_num * root_size)
+        return RootIndex.unpack(file.read(root_size), self.root_index_block_factor)
 
     def _write_root_index(self, file, page_num, root_index):
-        file.seek(page_num * RootIndex.SIZE_OF_ROOT_INDEX)
+        root_size = RootIndex.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE
+        file.seek(page_num * root_size)
         file.write(root_index.pack())
 
     def _read_leaf_index(self, file, page_num):
-        file.seek(page_num * LeafIndex.SIZE_OF_LEAF_INDEX)
-        return LeafIndex.unpack(file.read(LeafIndex.SIZE_OF_LEAF_INDEX))
+        leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+        file.seek(page_num * leaf_size)
+        return LeafIndex.unpack(file.read(leaf_size), self.leaf_index_block_factor)
 
     def _write_leaf_index(self, file, page_num, leaf_index):
-        file.seek(page_num * LeafIndex.SIZE_OF_LEAF_INDEX)
+        leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+        file.seek(page_num * leaf_size)
         file.write(leaf_index.pack())
 
     # Operaciones comunes
@@ -465,12 +473,13 @@ class ISAMFile:
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
 
-        left_page = Page(left_records)
+        left_page = Page(left_records, block_factor=self.block_factor)
         self._write_page(file, page_num, left_page)
 
         file.seek(0, 2)
-        new_page_num = (file.tell() - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
-        right_page = Page(right_records)
+        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        new_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
+        right_page = Page(right_records, block_factor=self.block_factor)
         file.write(right_page.pack())
 
         separator_key = right_records[0].id_venta
@@ -483,17 +492,18 @@ class ISAMFile:
 
         all_records = page.records + [new_record]
         all_records.sort(key=lambda r: r.id_venta)
-        
+
         mid_point = len(all_records) // 2
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
-        
-        left_page = Page(left_records)
+
+        left_page = Page(left_records, block_factor=self.block_factor)
         self._write_page(file, page_num, left_page)
         
         file.seek(0, 2)
-        new_data_page_num = (file.tell() - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
-        right_page = Page(right_records)
+        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        new_data_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
+        right_page = Page(right_records, block_factor=self.block_factor)
         file.write(right_page.pack())
         self.next_page_number = new_data_page_num + 1
         
@@ -505,7 +515,7 @@ class ISAMFile:
             new_entry = LeafIndexEntry(separator_key, new_data_page_num)
             current_leaf_index.insert_sorted(new_entry)
             
-            if len(current_leaf_index.entries) > LEAF_INDEX_BLOCK_FACTOR:
+            if len(current_leaf_index.entries) > self.leaf_index_block_factor:
                 self._split_leaf_index_page(leaf_index_file, leaf_page_num, current_leaf_index)
             else:
                 self._write_leaf_index(leaf_index_file, leaf_page_num, current_leaf_index)
@@ -517,14 +527,15 @@ class ISAMFile:
 
         # Calcular nueva página antes de escribir
         leaf_index_file.seek(0, 2)
-        new_leaf_page_num = leaf_index_file.tell() // LeafIndex.SIZE_OF_LEAF_INDEX
+        leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+        new_leaf_page_num = leaf_index_file.tell() // leaf_size
 
         # El lado izquierdo apunta al nuevo lado derecho
-        left_leaf_index = LeafIndex(left_entries, new_leaf_page_num)
+        left_leaf_index = LeafIndex(left_entries, new_leaf_page_num, self.leaf_index_block_factor)
         self._write_leaf_index(leaf_index_file, leaf_page_num, left_leaf_index)
 
         # El lado derecho mantiene el next_page original
-        right_leaf_index = LeafIndex(right_entries, overloaded_leaf_index.next_page)
+        right_leaf_index = LeafIndex(right_entries, overloaded_leaf_index.next_page, self.leaf_index_block_factor)
         self._write_leaf_index(leaf_index_file, new_leaf_page_num, right_leaf_index)
 
         self.next_leaf_index_page_number = new_leaf_page_num + 1
@@ -544,10 +555,11 @@ class ISAMFile:
                 new_overflow_page_num = free_page_num
             else:
                 file.seek(0, 2)
-                new_overflow_page_num = (file.tell() - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+                page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+                new_overflow_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
                 self.next_page_number = new_overflow_page_num + 1
             
-            new_overflow_page = Page([new_record])
+            new_overflow_page = Page([new_record], block_factor=self.block_factor)
             self._write_page(file, new_overflow_page_num, new_overflow_page)
             
             page_found.next_page = new_overflow_page_num
@@ -583,7 +595,7 @@ class ISAMFile:
             new_entry = LeafIndexEntry(right_key, right_page_num)
             leaf_index.insert_sorted(new_entry)
 
-            if len(leaf_index.entries) > LEAF_INDEX_BLOCK_FACTOR:
+            if len(leaf_index.entries) > self.leaf_index_block_factor:
                 self._split_leaf_index_page(file, leaf_page_num, leaf_index)
             else:
                 self._write_leaf_index(file, leaf_page_num, leaf_index)
@@ -594,7 +606,7 @@ class ISAMFile:
             new_entry = LeafIndexEntry(key, page_num)
             leaf_index.insert_sorted(new_entry)
 
-            if len(leaf_index.entries) > LEAF_INDEX_BLOCK_FACTOR:
+            if len(leaf_index.entries) > self.leaf_index_block_factor:
                 self._split_leaf_index_page(file, leaf_page_num, leaf_index)
             else:
                 self._write_leaf_index(file, leaf_page_num, leaf_index)
@@ -622,7 +634,7 @@ class ISAMFile:
                 if len(page.records) == 0 and self._is_overflow_page(current_page_num):
                     self._remove_page_from_chain(file, start_page_num, current_page_num)
                     self.free_list_stack.push_free_page(current_page_num)
-                elif len(page.records) <= CONSOLIDATION_THRESHOLD:
+                elif len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, current_page_num)
                 
                 return True
@@ -647,7 +659,7 @@ class ISAMFile:
                 if self._is_overflow_page(next_page_num):
                     self.free_list_stack.push_free_page(next_page_num)
                 else:
-                    empty_page = Page()
+                    empty_page = Page(block_factor=self.block_factor)
                     self._write_page(file, next_page_num, empty_page)
 
     def _remove_page_from_chain(self, file, start_page_num, page_to_remove):
@@ -721,7 +733,7 @@ class ISAMFile:
             if page.remove_record(id_venta):
                 self._write_page(file, target_data_page_num, page)
                 
-                if len(page.records) <= CONSOLIDATION_THRESHOLD:
+                if len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, target_data_page_num)
                 
                 return True
@@ -771,7 +783,8 @@ class ISAMFile:
     def _continue_range_search_in_next_pages(self, begin_key, end_key, start_leaf_page, visited_pages, results):
         with open(self.leaf_index_file, "rb") as leaf_file:
             file_size = os.path.getsize(self.leaf_index_file)
-            num_leaf_pages = file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+            leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+            num_leaf_pages = file_size // leaf_size
 
             with open(self.filename, "rb") as data_file:
                 # Buscar en las siguientes páginas de datos desde el leaf index actual
@@ -839,7 +852,8 @@ class ISAMFile:
                 
                 with open(self.leaf_index_file, "rb") as leaf_file:
                     leaf_file_size = os.path.getsize(self.leaf_index_file)
-                    num_leaf_pages = leaf_file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+                    leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+                    num_leaf_pages = leaf_file_size // leaf_size
                     
 
                     for root_entry in root_index.entries:
@@ -849,7 +863,8 @@ class ISAMFile:
 
                     with open(self.filename, "rb") as data_file:
                         data_file_size = os.path.getsize(self.filename)
-                        num_data_pages = (data_file_size - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+                        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+                        num_data_pages = (data_file_size - self.DATA_START_OFFSET) // page_size
                         
                         for i in range(num_leaf_pages):
                             leaf_index = self._read_leaf_index(leaf_file, i)
@@ -887,7 +902,8 @@ class ISAMFile:
         if os.path.exists(self.leaf_index_file):
             with open(self.leaf_index_file, "rb") as file:
                 file_size = os.path.getsize(self.leaf_index_file)
-                num_leaf_pages = file_size // LeafIndex.SIZE_OF_LEAF_INDEX
+                leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
+                num_leaf_pages = file_size // leaf_size
                 
                 for i in range(num_leaf_pages):
                     leaf_index = self._read_leaf_index(file, i)
@@ -912,7 +928,8 @@ class ISAMFile:
                 print("  (archivo vacío)")
                 return
                 
-            num_pages = (file_size - self.DATA_START_OFFSET) // Page.SIZE_OF_PAGE
+            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+            num_pages = (file_size - self.DATA_START_OFFSET) // page_size
             visited = set()
             
             for i in range(num_pages):
