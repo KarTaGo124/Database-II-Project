@@ -429,7 +429,7 @@ class ISAMFile:
         file.seek(page_num * leaf_size)
         file.write(leaf_index.pack())
 
-    # Operaciones comunes
+    # Operaciones intermedias
     
     def _find_target_leaf_page(self, id_venta):
         if not os.path.exists(self.root_index_file):
@@ -722,6 +722,95 @@ class ISAMFile:
             
             current_page_num = page.next_page
 
+    def _extract_all_records(self):
+        all_records = []
+        if not os.path.exists(self.filename):
+            return all_records
+
+        with open(self.filename, "rb") as file:
+            file_size = os.path.getsize(self.filename)
+            if file_size < self.DATA_START_OFFSET:
+                return all_records
+
+            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+            num_pages = (file_size - self.DATA_START_OFFSET) // page_size
+            visited = set()
+
+            for i in range(num_pages):
+                if i in visited:
+                    continue
+
+                current_page_num = i
+                while current_page_num is not None and current_page_num not in visited:
+                    visited.add(current_page_num)
+                    page = self._read_page(file, current_page_num)
+
+                    all_records.extend(page.records)
+                    current_page_num = page.next_page if page.next_page != -1 else None
+
+        all_records.sort(key=lambda r: r.id_venta)
+        return all_records
+
+    def _count_overflow_chain_length(self, file, start_page_num):
+        if self._is_overflow_page(start_page_num):
+            return 0
+
+        page = self._read_page(file, start_page_num)
+        if page.next_page == -1:
+            return 0
+
+        length = 1
+        current = page.next_page
+        while current != -1 and length < 10:
+            try:
+                next_page = self._read_page(file, current)
+                current = next_page.next_page
+                length += 1
+            except:
+                break
+
+        return length
+
+    def _should_rebuild(self):
+        if not os.path.exists(self.filename):
+            return False
+
+        free_count = self._get_free_count()
+        if free_count == 0:
+            return False
+
+        with open(self.filename, "rb") as file:
+            file_size = os.path.getsize(self.filename)
+            if file_size < self.DATA_START_OFFSET:
+                return False
+
+            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+            total_pages = (file_size - self.DATA_START_OFFSET) // page_size
+
+            if total_pages == 0:
+                return False
+
+            free_ratio = free_count / total_pages
+
+            if free_ratio > 0.25:
+                return True
+
+            chain_count = 0
+            chain_total = 0
+
+            for i in range(total_pages):
+                if not self._is_overflow_page(i):
+                    chain_length = self._count_overflow_chain_length(file, i)
+                    if chain_length > 0:
+                        chain_count += 1
+                        chain_total += chain_length
+
+            if chain_count > 0:
+                avg_chain = chain_total / chain_count
+                return avg_chain > 2.5
+
+        return False
+
     # Operaciones principales
     
     def add(self, record: Record):
@@ -779,7 +868,11 @@ class ISAMFile:
                 
                 if len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, target_data_page_num)
-                
+
+                    if self._should_rebuild():
+                        print("Auto-rebuilding due to fragmentation...")
+                        self.rebuild()
+
                 return True
             
             return self._delete_from_overflow_chain(file, target_data_page_num, id_venta)
@@ -818,6 +911,37 @@ class ISAMFile:
                             current_page_num = page.next_page if page.next_page != -1 else None
 
         return sorted(results, key=lambda r: r.id_venta)
+
+    def rebuild(self):
+        all_records = self._extract_all_records()
+
+        old_files = [self.filename, self.root_index_file, self.leaf_index_file]
+        backup_files = [f + ".backup" for f in old_files]
+
+        for old, backup in zip(old_files, backup_files):
+            if os.path.exists(old):
+                os.rename(old, backup)
+
+        new_root_factor = int(self.root_index_block_factor * 1.5)
+        new_leaf_factor = int(self.leaf_index_block_factor * 1.5)
+        new_block_factor = int(self.block_factor * 1.3)
+
+        self.root_index_block_factor = new_root_factor
+        self.leaf_index_block_factor = new_leaf_factor
+        self.block_factor = new_block_factor
+        self.consolidation_threshold = new_block_factor // 3
+
+        self.free_list_stack.clear()
+        self.next_page_number = 0
+        self.next_root_index_page_number = 0
+        self.next_leaf_index_page_number = 0
+
+        for record in all_records:
+            self.add(record)
+
+        for backup in backup_files:
+            if os.path.exists(backup):
+                os.remove(backup)
 
     # Funciones extras
 
@@ -889,66 +1013,6 @@ class ISAMFile:
         
         return errors
 
-    def rebuild(self):
-        all_records = self._extract_all_records()
-
-        old_files = [self.filename, self.root_index_file, self.leaf_index_file]
-        backup_files = [f + ".backup" for f in old_files]
-
-        for old, backup in zip(old_files, backup_files):
-            if os.path.exists(old):
-                os.rename(old, backup)
-
-        new_root_factor = int(self.root_index_block_factor * 1.5)
-        new_leaf_factor = int(self.leaf_index_block_factor * 1.5)
-        new_block_factor = int(self.block_factor * 1.3)
-
-        self.root_index_block_factor = new_root_factor
-        self.leaf_index_block_factor = new_leaf_factor
-        self.block_factor = new_block_factor
-        self.consolidation_threshold = new_block_factor // 3
-
-        self.free_list_stack.clear()
-        self.next_page_number = 0
-        self.next_root_index_page_number = 0
-        self.next_leaf_index_page_number = 0
-
-        for record in all_records:
-            self.add(record)
-
-        for backup in backup_files:
-            if os.path.exists(backup):
-                os.remove(backup)
-
-    def _extract_all_records(self):
-        all_records = []
-        if not os.path.exists(self.filename):
-            return all_records
-
-        with open(self.filename, "rb") as file:
-            file_size = os.path.getsize(self.filename)
-            if file_size < self.DATA_START_OFFSET:
-                return all_records
-
-            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
-            num_pages = (file_size - self.DATA_START_OFFSET) // page_size
-            visited = set()
-
-            for i in range(num_pages):
-                if i in visited:
-                    continue
-
-                current_page_num = i
-                while current_page_num is not None and current_page_num not in visited:
-                    visited.add(current_page_num)
-                    page = self._read_page(file, current_page_num)
-
-                    all_records.extend(page.records)
-                    current_page_num = page.next_page if page.next_page != -1 else None
-
-        all_records.sort(key=lambda r: r.id_venta)
-        return all_records
-
     def show_structure(self):
         print("=== ESTRUCTURA DEL ISAM DE DOS NIVELES ===")
         
@@ -1014,8 +1078,15 @@ class ISAMFile:
                     ids = [record.id_venta for record in page.records]
                     next_page_info = f"next_page: {page.next_page}" if page.next_page != -1 else "next_page: None"
                     overflow_info = " (overflow)" if self._is_overflow_page(current_page_num) else " (main)"
-                    print(f"  Página {current_page_num}: IDs {ids}, {next_page_info}{overflow_info}")
-                    
+
+                    chain_info = ""
+                    if not self._is_overflow_page(current_page_num):
+                        chain_length = self._count_overflow_chain_length(file, current_page_num)
+                        if chain_length > 0:
+                            chain_info = f", chain: {chain_length}"
+
+                    print(f"  Página {current_page_num}: IDs {ids}, {next_page_info}{overflow_info}{chain_info}")
+
                     current_page_num = page.next_page if page.next_page != -1 else None
 
 
