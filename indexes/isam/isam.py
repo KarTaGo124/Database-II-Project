@@ -1,70 +1,44 @@
 import os, struct
+from ..core.record import Record
 
 BLOCK_FACTOR = 10
 ROOT_INDEX_BLOCK_FACTOR = 8
 LEAF_INDEX_BLOCK_FACTOR = 12
 CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
-class Record:
-    FORMAT = '50sifi10s'
-    SIZE_OF_RECORD = struct.calcsize(FORMAT)
-
-    def __init__(self, id_venta: int, nombre_producto: str, cantidad_vendida: int, precio_unitario: float, fecha_venta: str):
-        self.id_venta = id_venta
-        self.nombre_producto = nombre_producto
-        self.cantidad_vendida = cantidad_vendida
-        self.precio_unitario = precio_unitario
-        self.fecha_venta = fecha_venta
-    
-    def pack(self) -> bytes:
-        return struct.pack(self.FORMAT, 
-            self.nombre_producto[:50].ljust(50).encode(),
-            self.id_venta,
-            self.precio_unitario,
-            self.cantidad_vendida,
-            self.fecha_venta[:10].ljust(10).encode()
-        )
-
-    @staticmethod
-    def unpack(data: bytes):
-        nombre_producto, id_venta, precio_unitario, cantidad_vendida, fecha_venta = struct.unpack(Record.FORMAT, data)
-        return Record(id_venta, nombre_producto.decode().rstrip(), cantidad_vendida, precio_unitario, fecha_venta.decode().rstrip())
-
-    def __str__(self):
-        return f"{self.id_venta} - {self.nombre_producto} - {self.cantidad_vendida} - {self.precio_unitario} - {self.fecha_venta}"
-
 
 class Page:
     HEADER_FORMAT = 'ii'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    def __init__(self, records=None, next_page=-1, block_factor=BLOCK_FACTOR):
+    def __init__(self, records=None, next_page=-1, block_factor=BLOCK_FACTOR, record_size=None):
         self.records = records if records else []
         self.next_page = next_page
         self.block_factor = block_factor
-        self.SIZE_OF_PAGE = self.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        self.record_size = record_size
+        self.SIZE_OF_PAGE = self.HEADER_SIZE + self.block_factor * self.record_size if record_size else None
 
     def pack(self):
         header_data = struct.pack(self.HEADER_FORMAT, len(self.records), self.next_page)
         record_data = b''.join(r.pack() for r in self.records)
-        record_data += b'\x00' * (Record.SIZE_OF_RECORD * (self.block_factor - len(self.records)))
+        record_data += b'\x00' * (self.record_size * (self.block_factor - len(self.records)))
         return header_data + record_data
 
     @staticmethod
-    def unpack(data: bytes, block_factor=BLOCK_FACTOR):
+    def unpack(data: bytes, block_factor=BLOCK_FACTOR, record_size=None, table=None):
         size, next_page = struct.unpack(Page.HEADER_FORMAT, data[:Page.HEADER_SIZE])
         offset = Page.HEADER_SIZE
         records = []
         for _ in range(size):
-            record_data = data[offset: offset + Record.SIZE_OF_RECORD]
-            records.append(Record.unpack(record_data))
-            offset += Record.SIZE_OF_RECORD
-        return Page(records, next_page, block_factor)
+            record_data = data[offset: offset + record_size]
+            records.append(Record.unpack(record_data, table.all_fields, table.key_field))
+            offset += record_size
+        return Page(records, next_page, block_factor, record_size)
     
     def insert_sorted(self, record):
         left, right = 0, len(self.records)
         while left < right:
             mid = (left + right) // 2
-            if self.records[mid].id_venta < record.id_venta:
+            if self.records[mid].get_key() < record.get_key():
                 left = mid + 1
             else:
                 right = mid
@@ -73,32 +47,32 @@ class Page:
     def is_full(self):
         return len(self.records) >= self.block_factor
     
-    def remove_record(self, id_venta):
+    def remove_record(self, key_value):
         original_count = len(self.records)
         left, right = 0, len(self.records) - 1
         found_indices = []
-        
+
         while left <= right:
             mid = (left + right) // 2
-            if self.records[mid].id_venta == id_venta:
+            if self.records[mid].get_key() == key_value:
                 found_indices.append(mid)
                 i = mid - 1
-                while i >= 0 and self.records[i].id_venta == id_venta:
+                while i >= 0 and self.records[i].get_key() == key_value:
                     found_indices.append(i)
                     i -= 1
                 i = mid + 1
-                while i < len(self.records) and self.records[i].id_venta == id_venta:
+                while i < len(self.records) and self.records[i].get_key() == key_value:
                     found_indices.append(i)
                     i += 1
                 break
-            elif self.records[mid].id_venta < id_venta:
+            elif self.records[mid].get_key() < key_value:
                 left = mid + 1
             else:
                 right = mid - 1
-        
+
         for idx in sorted(found_indices, reverse=True):
             del self.records[idx]
-            
+
         return len(self.records) < original_count
     
     def is_empty(self):
@@ -109,7 +83,7 @@ class Page:
     
     def merge_with(self, other_page):
         all_records = self.records + other_page.records
-        all_records.sort(key=lambda r: r.id_venta)
+        all_records.sort(key=lambda r: r.get_key())
         self.records = all_records
 
 
@@ -341,14 +315,13 @@ class FreeListStack:
 
 
 class ISAMFile:
-    HEADER_FORMAT = 'i'  
+    HEADER_FORMAT = 'i'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    DATA_START_OFFSET = HEADER_SIZE  
-    
-    # Inicialización
+    DATA_START_OFFSET = HEADER_SIZE
 
-    def __init__(self, filename="datos.dat", root_index_file="root_index.dat", leaf_index_file="leaf_index.dat", free_list_file="free_list.dat",
+    def __init__(self, table, filename="datos.dat", root_index_file="root_index.dat", leaf_index_file="leaf_index.dat", free_list_file="free_list.dat",
                  block_factor=None, root_index_block_factor=None, leaf_index_block_factor=None, consolidation_threshold=None):
+        self.table = table
         self.filename = filename
         self.root_index_file = root_index_file
         self.leaf_index_file = leaf_index_file
@@ -366,20 +339,20 @@ class ISAMFile:
     def _create_initial_files(self, record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 0))
-            page = Page([record], block_factor=self.block_factor)
+            page = Page([record], block_factor=self.block_factor, record_size=self.table.record_size)
             file.write(page.pack())
 
         with open(self.leaf_index_file, "wb") as file:
-            initial_entry = LeafIndexEntry(record.id_venta, 0)
+            initial_entry = LeafIndexEntry(record.get_key(), 0)
             leaf_index = LeafIndex([initial_entry], leaf_index_block_factor=self.leaf_index_block_factor)
             file.write(leaf_index.pack())
 
         with open(self.root_index_file, "wb") as file:
             root_index = RootIndex([], root_index_block_factor=self.root_index_block_factor)
             file.write(root_index.pack())
-        
+
         self.free_list_stack.clear()
-        
+
         self.next_page_number = 1
         self.next_leaf_index_page_number = 1
         self.next_root_index_page_number = 1
@@ -398,13 +371,13 @@ class ISAMFile:
     # Escritura y lectura de páginas e índices
     
     def _read_page(self, file, page_num):
-        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
         offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
-        return Page.unpack(file.read(page_size), self.block_factor)
+        return Page.unpack(file.read(page_size), self.block_factor, self.table.record_size, self.table)
 
     def _write_page(self, file, page_num, page):
-        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
         offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
         file.write(page.pack())
@@ -431,13 +404,13 @@ class ISAMFile:
 
     # Operaciones intermedias
     
-    def _find_target_leaf_page(self, id_venta):
+    def _find_target_leaf_page(self, key_value):
         if not os.path.exists(self.root_index_file):
             return 0
 
         with open(self.root_index_file, "rb") as file:
             root_index = self._read_root_index(file, 0)
-            return root_index.find_leaf_page_for_key(id_venta)
+            return root_index.find_leaf_page_for_key(key_value)
 
     def _find_leaf_page_range_for_keys(self, begin_key, end_key):
         if not os.path.exists(self.root_index_file) or not os.path.exists(self.leaf_index_file):
@@ -483,13 +456,13 @@ class ISAMFile:
 
             return start_leaf, end_leaf
 
-    def _find_target_data_page(self, id_venta, leaf_page_num):
+    def _find_target_data_page(self, key_value, leaf_page_num):
         if not os.path.exists(self.leaf_index_file):
             return 0
-        
+
         with open(self.leaf_index_file, "rb") as file:
             leaf_index = self._read_leaf_index(file, leaf_page_num)
-            return leaf_index.find_data_page_for_key(id_venta)
+            return leaf_index.find_data_page_for_key(key_value)
 
     def _handle_page_overflow(self, file, page_num, page, new_record, current_leaf_page_num):
         with open(self.leaf_index_file, "rb") as leaf_index_file:
@@ -511,47 +484,46 @@ class ISAMFile:
 
     def _split_page_strategy(self, file, page_num, page, new_record, leaf_page_num):
         all_records = page.records + [new_record]
-        all_records.sort(key=lambda r: r.id_venta)
+        all_records.sort(key=lambda r: r.get_key())
 
         mid_point = len(all_records) // 2
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
 
-        left_page = Page(left_records, block_factor=self.block_factor)
+        left_page = Page(left_records, block_factor=self.block_factor, record_size=self.table.record_size)
         self._write_page(file, page_num, left_page)
 
         file.seek(0, 2)
-        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
         new_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
-        right_page = Page(right_records, block_factor=self.block_factor)
+        right_page = Page(right_records, block_factor=self.block_factor, record_size=self.table.record_size)
         file.write(right_page.pack())
 
-        separator_key = right_records[0].id_venta
+        separator_key = right_records[0].get_key()
 
-        # Actualizar índice: 1) nueva entrada para página derecha, 2) actualizar entrada de página izquierda
-        self._update_leaf_index_after_split(separator_key, new_page_num, page_num, left_records[0].id_venta, leaf_page_num)
+        self._update_leaf_index_after_split(separator_key, new_page_num, page_num, left_records[0].get_key(), leaf_page_num)
         self.next_page_number = new_page_num + 1
 
     def _split_leaf_index_strategy(self, file, page_num, page, new_record, leaf_page_num):
 
         all_records = page.records + [new_record]
-        all_records.sort(key=lambda r: r.id_venta)
+        all_records.sort(key=lambda r: r.get_key())
 
         mid_point = len(all_records) // 2
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
 
-        left_page = Page(left_records, block_factor=self.block_factor)
+        left_page = Page(left_records, block_factor=self.block_factor, record_size=self.table.record_size)
         self._write_page(file, page_num, left_page)
-        
+
         file.seek(0, 2)
-        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
         new_data_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
-        right_page = Page(right_records, block_factor=self.block_factor)
+        right_page = Page(right_records, block_factor=self.block_factor, record_size=self.table.record_size)
         file.write(right_page.pack())
         self.next_page_number = new_data_page_num + 1
-        
-        separator_key = right_records[0].id_venta
+
+        separator_key = right_records[0].get_key()
         
         with open(self.leaf_index_file, "r+b") as leaf_index_file:
             current_leaf_index = self._read_leaf_index(leaf_index_file, leaf_page_num)
@@ -589,7 +561,7 @@ class ISAMFile:
 
     def _overflow_page_strategy(self, file, page_num, original_page, new_record):
         page_num_found, page_found, need_new_page = self._find_available_or_last_page_in_chain(file, page_num)
-        
+
         if not need_new_page:
             page_found.insert_sorted(new_record)
             self._write_page(file, page_num_found, page_found)
@@ -599,13 +571,13 @@ class ISAMFile:
                 new_overflow_page_num = free_page_num
             else:
                 file.seek(0, 2)
-                page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+                page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
                 new_overflow_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
                 self.next_page_number = new_overflow_page_num + 1
-            
-            new_overflow_page = Page([new_record], block_factor=self.block_factor)
+
+            new_overflow_page = Page([new_record], block_factor=self.block_factor, record_size=self.table.record_size)
             self._write_page(file, new_overflow_page_num, new_overflow_page)
-            
+
             page_found.next_page = new_overflow_page_num
             self._write_page(file, page_num_found, page_found)
 
@@ -666,25 +638,25 @@ class ISAMFile:
             
             self._write_root_index(file, 0, root_index)
 
-    def _delete_from_overflow_chain(self, file, start_page_num, id_venta):
+    def _delete_from_overflow_chain(self, file, start_page_num, key_value):
         current_page_num = start_page_num
-        
+
         while current_page_num != -1:
             page = self._read_page(file, current_page_num)
-            
-            if page.remove_record(id_venta):
+
+            if page.remove_record(key_value):
                 self._write_page(file, current_page_num, page)
-                
+
                 if len(page.records) == 0 and self._is_overflow_page(current_page_num):
                     self._remove_page_from_chain(file, start_page_num, current_page_num)
                     self.free_list_stack.push_free_page(current_page_num)
                 elif len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, current_page_num)
-                
+
                 return True
-            
+
             current_page_num = page.next_page
-        
+
         return False
 
     def _try_consolidate_page(self, file, page_num):
@@ -703,7 +675,7 @@ class ISAMFile:
                 if self._is_overflow_page(next_page_num):
                     self.free_list_stack.push_free_page(next_page_num)
                 else:
-                    empty_page = Page(block_factor=self.block_factor)
+                    empty_page = Page(block_factor=self.block_factor, record_size=self.table.record_size)
                     self._write_page(file, next_page_num, empty_page)
 
     def _remove_page_from_chain(self, file, start_page_num, page_to_remove):
@@ -732,7 +704,7 @@ class ISAMFile:
             if file_size < self.DATA_START_OFFSET:
                 return all_records
 
-            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
             num_pages = (file_size - self.DATA_START_OFFSET) // page_size
             visited = set()
 
@@ -748,7 +720,7 @@ class ISAMFile:
                     all_records.extend(page.records)
                     current_page_num = page.next_page if page.next_page != -1 else None
 
-        all_records.sort(key=lambda r: r.id_venta)
+        all_records.sort(key=lambda r: r.get_key())
         return all_records
 
     def _count_overflow_chain_length(self, file, start_page_num):
@@ -784,7 +756,7 @@ class ISAMFile:
             if file_size < self.DATA_START_OFFSET:
                 return False
 
-            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
             total_pages = (file_size - self.DATA_START_OFFSET) // page_size
 
             if total_pages == 0:
@@ -813,13 +785,13 @@ class ISAMFile:
 
     # Operaciones principales
     
-    def add(self, record: Record):
+    def add(self, record):
         if not os.path.exists(self.filename):
             self._create_initial_files(record)
             return
 
-        target_leaf_page_num = self._find_target_leaf_page(record.id_venta)
-        target_data_page_num = self._find_target_data_page(record.id_venta, target_leaf_page_num)
+        target_leaf_page_num = self._find_target_leaf_page(record.get_key())
+        target_data_page_num = self._find_target_data_page(record.get_key(), target_leaf_page_num)
 
         with open(self.filename, "r+b") as file:
             page = self._read_page(file, target_data_page_num)
@@ -830,12 +802,12 @@ class ISAMFile:
             else:
                 self._handle_page_overflow(file, target_data_page_num, page, record, target_leaf_page_num)
 
-    def search(self, id_venta):
+    def search(self, key_value):
         if not os.path.exists(self.filename):
             return None
 
-        target_leaf_page_num = self._find_target_leaf_page(id_venta)
-        target_data_page_num = self._find_target_data_page(id_venta, target_leaf_page_num)
+        target_leaf_page_num = self._find_target_leaf_page(key_value)
+        target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
 
         with open(self.filename, "rb") as file:
             current_page_num = target_data_page_num
@@ -844,28 +816,28 @@ class ISAMFile:
                 page = self._read_page(file, current_page_num)
 
                 for record in page.records:
-                    if record.id_venta == id_venta:
+                    if record.get_key() == key_value:
                         return record
-                    elif record.id_venta > id_venta:
+                    elif record.get_key() > key_value:
                         return None
 
                 current_page_num = page.next_page if page.next_page != -1 else -1
 
             return None
 
-    def delete(self, id_venta):
+    def delete(self, key_value):
         if not os.path.exists(self.filename):
             return False
-        
-        target_leaf_page_num = self._find_target_leaf_page(id_venta)
-        target_data_page_num = self._find_target_data_page(id_venta, target_leaf_page_num)
-        
+
+        target_leaf_page_num = self._find_target_leaf_page(key_value)
+        target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
+
         with open(self.filename, "r+b") as file:
             page = self._read_page(file, target_data_page_num)
-            
-            if page.remove_record(id_venta):
+
+            if page.remove_record(key_value):
                 self._write_page(file, target_data_page_num, page)
-                
+
                 if len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, target_data_page_num)
 
@@ -874,8 +846,8 @@ class ISAMFile:
                         self.rebuild()
 
                 return True
-            
-            return self._delete_from_overflow_chain(file, target_data_page_num, id_venta)
+
+            return self._delete_from_overflow_chain(file, target_data_page_num, key_value)
 
     def range_search(self, begin_key, end_key):
         results = []
@@ -903,14 +875,14 @@ class ISAMFile:
                             page = self._read_page(data_file, current_page_num)
 
                             for record in page.records:
-                                if record.id_venta > end_key:
+                                if record.get_key() > end_key:
                                     break
-                                if begin_key <= record.id_venta <= end_key:
+                                if begin_key <= record.get_key() <= end_key:
                                     results.append(record)
 
                             current_page_num = page.next_page if page.next_page != -1 else None
 
-        return sorted(results, key=lambda r: r.id_venta)
+        return sorted(results, key=lambda r: r.get_key())
 
     def rebuild(self):
         all_records = self._extract_all_records()
@@ -997,7 +969,7 @@ class ISAMFile:
 
                     with open(self.filename, "rb") as data_file:
                         data_file_size = os.path.getsize(self.filename)
-                        page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+                        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
                         num_data_pages = (data_file_size - self.DATA_START_OFFSET) // page_size
                         
                         for i in range(num_leaf_pages):
@@ -1061,21 +1033,21 @@ class ISAMFile:
             if file_size < self.DATA_START_OFFSET:
                 print("  (archivo vacío)")
                 return
-                
-            page_size = Page.HEADER_SIZE + self.block_factor * Record.SIZE_OF_RECORD
+
+            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
             num_pages = (file_size - self.DATA_START_OFFSET) // page_size
             visited = set()
-            
+
             for i in range(num_pages):
                 if i in visited:
                     continue
-                    
+
                 current_page_num = i
                 while current_page_num is not None and current_page_num not in visited:
                     visited.add(current_page_num)
                     page = self._read_page(file, current_page_num)
-                    
-                    ids = [record.id_venta for record in page.records]
+
+                    ids = [record.get_key() for record in page.records]
                     next_page_info = f"next_page: {page.next_page}" if page.next_page != -1 else "next_page: None"
                     overflow_info = " (overflow)" if self._is_overflow_page(current_page_num) else " (main)"
 

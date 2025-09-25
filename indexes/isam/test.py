@@ -1,22 +1,38 @@
 import os
 import time
-from isam import ISAMFile, Record
+from .isam import ISAMFile
+from ..core.record import Record, Table
 
 
-def load_csv_data(filename):
-    """Cargador de datos CSV"""
+def create_sales_table():
+    return Table(
+        table_name="sales",
+        sql_fields=[
+            ("id_venta", "INT", 4),
+            ("nombre_producto", "CHAR", 50),
+            ("cantidad_vendida", "INT", 4),
+            ("precio_unitario", "FLOAT", 4),
+            ("fecha_venta", "CHAR", 10)
+        ],
+        key_field="id_venta"
+    )
+
+def load_csv_data(filename, table):
     records = []
     with open(filename, 'r', encoding='utf-8') as file:
         lines = file.readlines()
         for line in lines[1:]:
             parts = line.strip().split(';')
             if len(parts) == 5:
-                id_venta = int(parts[0])
-                nombre_producto = parts[1]
-                cantidad_vendida = int(parts[2])
-                precio_unitario = float(parts[3])
-                fecha_venta = parts[4]
-                records.append(Record(id_venta, nombre_producto, cantidad_vendida, precio_unitario, fecha_venta))
+                record = Record(table.all_fields, table.key_field)
+                record.set_values(
+                    id_venta=int(parts[0]),
+                    nombre_producto=parts[1],
+                    cantidad_vendida=int(parts[2]),
+                    precio_unitario=float(parts[3]),
+                    fecha_venta=parts[4]
+                )
+                records.append(record)
     return records
 
 
@@ -28,13 +44,14 @@ def test_with_real_data():
         if os.path.exists(file_path):
             os.remove(file_path)
 
-    isam = ISAMFile()
+    sales_table = create_sales_table()
+    isam = ISAMFile(sales_table)
 
-    csv_path = "../../data/sales_dataset_unsorted.csv"
+    csv_path = "data/sales_dataset_unsorted.csv"
     print(f"Cargando datos desde: {csv_path}")
 
     start_time = time.time()
-    records = load_csv_data(csv_path)
+    records = load_csv_data(csv_path, sales_table)
     load_time = time.time() - start_time
 
     print(f"Registros cargados: {len(records)} en {load_time:.3f}s")
@@ -63,7 +80,13 @@ def test_with_real_data():
     start_time = time.time()
     for key in test_keys:
         result = isam.search(key)
-        status = f"Encontrado: {result.nombre_producto}" if result else "No encontrado"
+        if result:
+            nombre = result.nombre_producto
+            if isinstance(nombre, bytes):
+                nombre = nombre.decode('utf-8').rstrip('\x00').strip()
+            status = f"Encontrado: {nombre}"
+        else:
+            status = "No encontrado"
         print(f"Busqueda {key:3d}: {status}")
     search_time = time.time() - start_time
     print(f"5 busquedas en {search_time:.4f}s")
@@ -76,7 +99,10 @@ def test_with_real_data():
 
     print(f"Registros entre 100 y 200: {len(range_results)} encontrados en {range_time:.4f}s")
     for record in range_results[:5]:
-        print(f"  {record.id_venta} - {record.nombre_producto}")
+        nombre = record.nombre_producto
+        if isinstance(nombre, bytes):
+            nombre = nombre.decode('utf-8').rstrip('\x00').strip()
+        print(f"  {record.get_key()} - {nombre}")
     if len(range_results) > 5:
         print(f"  ... y {len(range_results) - 5} mas")
 
@@ -101,6 +127,10 @@ def test_with_real_data():
     print(f"Busquedas: {search_time:.4f}s promedio")
     print(f"Implementacion ISAM funcional con datos reales")
     print(f"Validacion: {'PASO' if not errors else 'FALLO'}")
+    if errors:
+        print("Errores encontrados:")
+        for error in errors:
+            print(f"  - {error}")
 
 
 def test_basic_functionality():
@@ -111,15 +141,28 @@ def test_basic_functionality():
         if os.path.exists(file_path):
             os.remove(file_path)
 
-    isam = ISAMFile()
+    sales_table = create_sales_table()
+    isam = ISAMFile(sales_table)
 
-    test_records = [
-        Record(100, "ProductoA", 5, 25.50, "2023-01-01"),
-        Record(200, "ProductoB", 3, 15.75, "2023-01-02"),
-        Record(300, "ProductoC", 8, 45.25, "2023-01-03"),
-        Record(150, "ProductoD", 2, 12.00, "2023-01-04"),
-        Record(250, "ProductoE", 7, 32.80, "2023-01-05"),
+    test_data = [
+        (100, "ProductoA", 5, 25.50, "2023-01-01"),
+        (200, "ProductoB", 3, 15.75, "2023-01-02"),
+        (300, "ProductoC", 8, 45.25, "2023-01-03"),
+        (150, "ProductoD", 2, 12.00, "2023-01-04"),
+        (250, "ProductoE", 7, 32.80, "2023-01-05"),
     ]
+
+    test_records = []
+    for data in test_data:
+        record = Record(sales_table.all_fields, sales_table.key_field)
+        record.set_values(
+            id_venta=data[0],
+            nombre_producto=data[1],
+            cantidad_vendida=data[2],
+            precio_unitario=data[3],
+            fecha_venta=data[4]
+        )
+        test_records.append(record)
 
     for record in test_records:
         isam.add(record)
