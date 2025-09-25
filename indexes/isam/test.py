@@ -1,6 +1,6 @@
 import os
 import time
-from .isam import ISAMFile
+from .primary import ISAMPrimaryIndex
 from ..core.record import Record, Table
 
 
@@ -45,7 +45,7 @@ def test_with_real_data():
             os.remove(file_path)
 
     sales_table = create_sales_table()
-    isam = ISAMFile(sales_table)
+    isam = ISAMPrimaryIndex(sales_table)
 
     csv_path = "data/sales_dataset_unsorted.csv"
     print(f"Cargando datos desde: {csv_path}")
@@ -142,7 +142,7 @@ def test_basic_functionality():
             os.remove(file_path)
 
     sales_table = create_sales_table()
-    isam = ISAMFile(sales_table)
+    isam = ISAMPrimaryIndex(sales_table)
 
     test_data = [
         (100, "ProductoA", 5, 25.50, "2023-01-01"),

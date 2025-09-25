@@ -38,7 +38,9 @@ class Page:
         left, right = 0, len(self.records)
         while left < right:
             mid = (left + right) // 2
-            if self.records[mid].get_key() < record.get_key():
+            if self.records[mid].get_key() == record.get_key():
+                raise ValueError(f"Primary key {record.get_key()} already exists in page")
+            elif self.records[mid].get_key() < record.get_key():
                 left = mid + 1
             else:
                 right = mid
@@ -48,32 +50,19 @@ class Page:
         return len(self.records) >= self.block_factor
     
     def remove_record(self, key_value):
-        original_count = len(self.records)
         left, right = 0, len(self.records) - 1
-        found_indices = []
 
         while left <= right:
             mid = (left + right) // 2
             if self.records[mid].get_key() == key_value:
-                found_indices.append(mid)
-                i = mid - 1
-                while i >= 0 and self.records[i].get_key() == key_value:
-                    found_indices.append(i)
-                    i -= 1
-                i = mid + 1
-                while i < len(self.records) and self.records[i].get_key() == key_value:
-                    found_indices.append(i)
-                    i += 1
-                break
+                del self.records[mid]
+                return True
             elif self.records[mid].get_key() < key_value:
                 left = mid + 1
             else:
                 right = mid - 1
 
-        for idx in sorted(found_indices, reverse=True):
-            del self.records[idx]
-
-        return len(self.records) < original_count
+        return False
     
     def is_empty(self):
         return len(self.records) == 0
@@ -314,7 +303,7 @@ class FreeListStack:
         return self.get_free_count() == 0
 
 
-class ISAMFile:
+class ISAMPrimaryIndex:
     HEADER_FORMAT = 'i'
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
     DATA_START_OFFSET = HEADER_SIZE
@@ -786,6 +775,9 @@ class ISAMFile:
     # Operaciones principales
     
     def add(self, record):
+        if self.search(record.get_key()) is not None:
+            raise ValueError(f"Primary key {record.get_key()} already exists")
+
         if not os.path.exists(self.filename):
             self._create_initial_files(record)
             return
