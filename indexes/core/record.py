@@ -63,7 +63,10 @@ class Record:
 
     def _process_value(self, value, field_type: str, field_size: int):
         if field_type == "CHAR":
-            return value.ljust(field_size).encode('utf-8')[:field_size]
+            if isinstance(value, bytes):
+                return value[:field_size].ljust(field_size, b'\x00')
+            else:
+                return str(value).ljust(field_size).encode('utf-8')[:field_size]
         elif field_type == "INT":
             return int(value)
         elif field_type == "FLOAT":
@@ -112,7 +115,7 @@ class Record:
             value = getattr(self, field_name)
             if field_type == "CHAR" and value:
                 if isinstance(value, bytes):
-                    value = value.decode('utf-8').rstrip('\x00')
+                    value = value.decode('utf-8').rstrip('\x00').strip()
             fields.append(f"{field_name}: {value}")
 
         return f"Record({', '.join(fields)})"
