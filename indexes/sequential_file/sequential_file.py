@@ -2,18 +2,22 @@ import csv
 import os
 import struct
 from typing import List
-from .record import Record, TableMetadata
+from .record import Record, Table
 
 class SequentialFile:
-    def __init__(self, main_file: str, aux_file: str, table_metadata: TableMetadata, k_rec=None):
+    def __init__(self, main_file: str, aux_file: str, table: Table, k_rec=None):
         self.main_file = main_file
         self.aux_file = aux_file
-        self.metadata = table_metadata
-        self.list_of_types = table_metadata.list_of_types
-        self.key_field = table_metadata.key_field
-        self.k = k_rec if k_rec is not None else 10  # valor por defecto
+        self.table = table
+        self.list_of_types = table.all_fields
+        self.key_field = table.key_field
+        self.k = k_rec if k_rec is not None else 10 
         self.read_count = 0
         self.write_count = 0
+
+        # Asegurar que el campo active está en extra_fields
+        if not any(field[0] == 'active' for field in self.list_of_types):
+            raise ValueError("La tabla debe tener un campo 'active' de tipo BOOL en extra_fields")
 
         if not os.path.exists(self.main_file):
             open(self.main_file, 'wb').close()
