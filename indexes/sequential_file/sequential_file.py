@@ -2,7 +2,7 @@ import csv
 import os
 import struct
 from typing import List
-from .record import Record, Table
+from Record import Record, Table
 
 class SequentialFile:
     def __init__(self, main_file: str, aux_file: str, table: Table, k_rec=None):
