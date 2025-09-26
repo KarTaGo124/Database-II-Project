@@ -131,3 +131,5 @@ class Record:
             if field_type == "CHAR" and isinstance(value, bytes):
                 value = value.decode('utf-8').rstrip('\x00')
             print(f"  {field_name} ({field_type}[{field_size}]): {value}")
+
+
