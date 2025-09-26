@@ -180,7 +180,9 @@ class ISAMSecondaryBase:
 
         self.free_list_stack = SecondaryFreeListStack(self.free_list_filename)
 
-    def add_to_secondary(self, record):
+    # Operaciones principales
+
+    def insert(self, record):
         try:
             secondary_value = getattr(record, self.field_name)
             primary_key = record.get_key()
@@ -207,7 +209,7 @@ class ISAMSecondaryBase:
         except Exception as e:
             raise
 
-    def search_by_secondary(self, secondary_value):
+    def search(self, secondary_value):
         results = []
 
         if not os.path.exists(self.filename):
@@ -239,11 +241,43 @@ class ISAMSecondaryBase:
 
         return results
 
-    def delete_from_secondary(self, record):
+    def range_search(self, start_value, end_value):
+        results = []
+
+        if not os.path.exists(self.filename):
+            return results
+
+        search_key = self._get_search_key(start_value)
+        target_leaf_page_num = self._find_target_leaf_page(search_key)
+        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
+
+        current_page_num = target_data_page_num
+
+        with open(self.filename, "rb") as file:
+            while current_page_num is not None:
+                page = self._read_page(file, current_page_num)
+
+                for index_record in page.records:
+                    if hasattr(index_record, 'index_value'):
+                        if self._value_greater(index_record.index_value, end_value):
+                            return results
+
+                        if self._value_in_range(index_record.index_value, start_value, end_value):
+                            primary_record = self.primary_isam.search(index_record.primary_key)
+                            if primary_record:
+                                results.append(primary_record)
+
+                current_page_num = page.next_page if page.next_page != -1 else None
+
+        return results
+
+    def delete(self, record):
         secondary_value = getattr(record, self.field_name)
         primary_key = record.get_key()
 
         return self._delete_record(secondary_value, primary_key)
+
+    # Operaciones intermedias
 
     def _delete_record(self, secondary_value, primary_key):
         if not os.path.exists(self.filename):
@@ -274,35 +308,7 @@ class ISAMSecondaryBase:
 
         return False
 
-    def range_search_by_secondary(self, start_value, end_value):
-        results = []
-
-        if not os.path.exists(self.filename):
-            return results
-
-        search_key = self._get_search_key(start_value)
-        target_leaf_page_num = self._find_target_leaf_page(search_key)
-        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
-
-        current_page_num = target_data_page_num
-
-        with open(self.filename, "rb") as file:
-            while current_page_num is not None:
-                page = self._read_page(file, current_page_num)
-
-                for index_record in page.records:
-                    if hasattr(index_record, 'index_value'):
-                        if self._value_greater(index_record.index_value, end_value):
-                            return results
-
-                        if self._value_in_range(index_record.index_value, start_value, end_value):
-                            primary_record = self.primary_isam.search(index_record.primary_key)
-                            if primary_record:
-                                results.append(primary_record)
-
-                current_page_num = page.next_page if page.next_page != -1 else None
-
-        return results
+    # Escritura y lectura de páginas e índices
 
     def _read_page(self, file, page_num):
         page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size
@@ -370,6 +376,8 @@ class ISAMSecondaryBase:
                 # Link previous page to new page
                 current_overflow_page.next_page = new_overflow_page_num
                 self._write_page(file, current_overflow_page_num, current_overflow_page)
+
+    # Funciones extras
 
     def scanAll(self):
         results = []
