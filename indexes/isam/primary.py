@@ -220,21 +220,21 @@ class LeafIndex:
     def find_data_page_for_key(self, key):
         if not self.entries:
             return 0
-        
+
         left = 0
         right = len(self.entries) - 1
-        result_page = 0 
-        
+        result_page = 0
+
         while left <= right:
             mid = (left + right) // 2
             mid_key = self.entries[mid].key
-            
+
             if key < mid_key:
                 right = mid - 1
             elif key >= mid_key:
                 result_page = self.entries[mid].data_page_number
                 left = mid + 1
-            
+
         return result_page
 
 
@@ -308,10 +308,20 @@ class ISAMPrimaryIndex:
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
     DATA_START_OFFSET = HEADER_SIZE
 
-    def __init__(self, table, filename="datos.dat", root_index_file="root_index.dat", leaf_index_file="leaf_index.dat", free_list_file="free_list.dat",
+    def __init__(self, table, filename="datos.dat", root_index_file=None, leaf_index_file=None, free_list_file=None,
                  block_factor=None, root_index_block_factor=None, leaf_index_block_factor=None, consolidation_threshold=None):
         self.table = table
         self.filename = filename
+
+        base_dir = os.path.dirname(filename)
+
+        if root_index_file is None:
+            root_index_file = os.path.join(base_dir, "root_index.dat")
+        if leaf_index_file is None:
+            leaf_index_file = os.path.join(base_dir, "leaf_index.dat")
+        if free_list_file is None:
+            free_list_file = os.path.join(base_dir, "free_list.dat")
+
         self.root_index_file = root_index_file
         self.leaf_index_file = leaf_index_file
         self.free_list_stack = FreeListStack(free_list_file)
@@ -586,6 +596,26 @@ class ISAMPrimaryIndex:
         
         return start_page_num, None, True
 
+
+    def _search_in_page_chain(self, file, start_page_num, key_value):
+        current_page_num = start_page_num
+        visited = set()
+
+        while current_page_num != -1 and current_page_num not in visited:
+            visited.add(current_page_num)
+            try:
+                page = self._read_page(file, current_page_num)
+
+                for record in page.records:
+                    if record.get_key() == key_value:
+                        return record
+
+                current_page_num = page.next_page if page.next_page != -1 else -1
+            except:
+                break
+
+        return None
+
     def _update_leaf_index_after_split(self, right_key, right_page_num, left_page_num, left_key, leaf_page_num):
         with open(self.leaf_index_file, "r+b") as file:
             leaf_index = self._read_leaf_index(file, leaf_page_num)
@@ -802,20 +832,7 @@ class ISAMPrimaryIndex:
         target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
 
         with open(self.filename, "rb") as file:
-            current_page_num = target_data_page_num
-
-            while current_page_num != -1:
-                page = self._read_page(file, current_page_num)
-
-                for record in page.records:
-                    if record.get_key() == key_value:
-                        return record
-                    elif record.get_key() > key_value:
-                        return None
-
-                current_page_num = page.next_page if page.next_page != -1 else -1
-
-            return None
+            return self._search_in_page_chain(file, target_data_page_num, key_value)
 
     def delete(self, key_value):
         if not os.path.exists(self.filename):
@@ -1014,12 +1031,42 @@ class ISAMPrimaryIndex:
         else:
             print("  (no existe)")
 
+        self.show_data_structure()
+
     def scanAll(self):
+        results = []
+
+        if not os.path.exists(self.filename):
+            return results
+
+        with open(self.filename, "rb") as file:
+            file_size = os.path.getsize(self.filename)
+            if file_size < self.DATA_START_OFFSET:
+                return results
+
+            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+            num_pages = (file_size - self.DATA_START_OFFSET) // page_size
+            visited = set()
+
+            for i in range(num_pages):
+                if i in visited:
+                    continue
+
+                current_page_num = i
+                while current_page_num is not None and current_page_num not in visited:
+                    visited.add(current_page_num)
+                    page = self._read_page(file, current_page_num)
+                    results.extend(page.records)
+                    current_page_num = page.next_page if page.next_page != -1 else None
+
+        return results
+
+    def show_data_structure(self):
         print("\n--- DATA PAGES ---")
         if not os.path.exists(self.filename):
             print("  (no existe)")
             return
-            
+
         with open(self.filename, "rb") as file:
             file_size = os.path.getsize(self.filename)
             if file_size < self.DATA_START_OFFSET:
@@ -1052,5 +1099,32 @@ class ISAMPrimaryIndex:
                     print(f"  Página {current_page_num}: IDs {ids}, {next_page_info}{overflow_info}{chain_info}")
 
                     current_page_num = page.next_page if page.next_page != -1 else None
+
+    def drop_table(self):
+        files_to_remove = [
+            self.filename,
+            self.root_index_file,
+            self.leaf_index_file,
+            self.free_list_stack.free_list_file
+        ]
+
+        removed_files = []
+        for file_path in files_to_remove:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    removed_files.append(file_path)
+                except OSError:
+                    pass
+
+        base_dir = os.path.dirname(self.filename)
+        if os.path.exists(base_dir) and not os.listdir(base_dir):
+            try:
+                os.rmdir(base_dir)
+                removed_files.append(base_dir)
+            except OSError:
+                pass
+
+        return removed_files
 
 
