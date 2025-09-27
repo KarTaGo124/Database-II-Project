@@ -17,6 +17,25 @@ class Bucket:
         self.next_bucket = next_bucket
         self.bucket_pos = bucket_pos
 
+    def search(self, datafile, bucketfile, key):
+        bucketfile.seek(self.bucket_pos)
+        local_depth, size, next_bucket = struct.unpack(
+            Bucket.HEADER_FORMAT, bucketfile.read(Bucket.HEADER_SIZE)
+        )
+        for i in range(size):
+            bucketfile.seek(self.bucket_pos + Bucket.HEADER_SIZE + i * 4)
+            offset = struct.unpack("i", bucketfile.read(4))[0]
+            datafile.seek(offset)
+            record = Record.unpack(datafile.read(Record.RECORD_SIZE))
+            if record.key == key:
+                return record
+        if next_bucket != -1:
+            bucketfile.seek(next_bucket)
+            local_depth, size, next_bucket = struct.unpack(Bucket.HEADER_FORMAT, bucketfile.read(Bucket.HEADER_SIZE))
+            bucket = Bucket(bucket_pos=next_bucket, local_depth=local_depth, size=size, next_bucket=next_bucket)
+            return bucket.search(datafile, bucketfile, key)
+        return None
+
     def insert(self, offset, bucketfile, global_depth, overflow_count=0):
         if self.size >= BLOCK_FACTOR:
             if self.local_depth < global_depth:
@@ -40,6 +59,35 @@ class Bucket:
             self.next_bucket
         ))
         return True
+    
+        # inside Bucket
+    def delete(self, key, datafile, bucketfile):
+        bucketfile.seek(self.bucket_pos)
+        local_depth, size, next_bucket = struct.unpack(Bucket.HEADER_FORMAT, bucketfile.read(Bucket.HEADER_SIZE))
+
+        for i in range(size):
+            bucketfile.seek(self.bucket_pos + Bucket.HEADER_SIZE + i * 4)
+            offset = struct.unpack("i", bucketfile.read(4))[0]
+
+            if offset < 0:
+                continue  # tombstone, skip
+
+            datafile.seek(offset)
+            record = Record.unpack(datafile.read(Record.RECORD_SIZE))
+            if record.key == key:
+                # mark as deleted by storing negative offset
+                bucketfile.seek(self.bucket_pos + Bucket.HEADER_SIZE + i * 4)
+                bucketfile.write(struct.pack("i", -offset))
+                return True
+
+        # check overflow bucket
+        if next_bucket != -1:
+            overflow_bucket = Bucket(next_bucket)
+            return overflow_bucket.delete(key, datafile, bucketfile)
+
+        return False
+
+
 
     def handle_overflow(self, offset, bucketfile, global_depth, overflow_count):
         # traverse chain if it exists
@@ -67,25 +115,6 @@ class Bucket:
 
         # insert into new bucket
         return new_bucket.insert(offset, bucketfile, global_depth, overflow_count + 1)
-
-    def search(self, datafile, bucketfile, key):
-        bucketfile.seek(self.bucket_pos)
-        local_depth, size, next_bucket = struct.unpack(
-            Bucket.HEADER_FORMAT, bucketfile.read(Bucket.HEADER_SIZE)
-        )
-        for i in range(size):
-            bucketfile.seek(self.bucket_pos + Bucket.HEADER_SIZE + i * 4)
-            offset = struct.unpack("i", bucketfile.read(4))[0]
-            datafile.seek(offset)
-            record = Record.unpack(datafile.read(Record.RECORD_SIZE))
-            if record.key == key:
-                return record
-        if next_bucket != -1:
-            bucketfile.seek(next_bucket)
-            local_depth, size, next_bucket = struct.unpack(Bucket.HEADER_FORMAT, bucketfile.read(Bucket.HEADER_SIZE))
-            bucket = Bucket(bucket_pos=next_bucket, local_depth=local_depth, size=size, next_bucket=next_bucket)
-            return bucket.search(datafile, bucketfile, key)
-        return None
 
 
 class ExtendableHashing:  # directory
@@ -171,6 +200,62 @@ class ExtendableHashing:  # directory
             pass
         self.size += 1
 
-    def handle_splitting(self):
-        # TODO: implement bucket split + directory update
-        pass
+    def delete(self, key):
+        bucket = self.get_bucket(key)
+        deleted = bucket.delete(key, self.file, self.bucketfile)
+        if deleted:
+            self.size -= 1
+        return deleted
+
+    def handle_splitting(self, bucket, offset):
+        # create new bucket at the end of the bucket file
+        self.indexfile.seek(0, 2)
+        new_pos = self.indexfile.tell()
+        new_bucket = Bucket(new_pos, local_depth=bucket.local_depth + 1)
+        self.indexfile.write(struct.pack(
+            Bucket.HEADER_FORMAT, new_bucket.local_depth, 0, -1
+        ))
+
+        # increase local depth of old bucket and reset size (we'll redistribute)
+        bucket.local_depth += 1
+        self.indexfile.seek(bucket.bucket_pos)
+        self.indexfile.write(struct.pack(
+            Bucket.HEADER_FORMAT,
+            bucket.local_depth,
+            0,   # reset size
+            -1   # reset overflow
+        ))
+
+        # collect all records, there is no overflow because we are splitting so no need to look for it
+        records_to_redistribute = []
+        for i in range(bucket.size):
+            self.indexfile.seek(bucket.bucket_pos + Bucket.HEADER_SIZE + i * 4)
+            records_to_redistribute.append(struct.unpack("i", self.indexfile.read(4))[0])
+        records_to_redistribute.append(offset)
+
+        # update directory entries
+        dir_entries = 2 ** self.global_depth
+        for i in range(dir_entries):
+            self.indexfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+            pos = struct.unpack(self.DIR_FORMAT, self.indexfile.read(self.DIR_SIZE))[0]
+
+            # only update entries that currently point to old bucket
+            if pos == bucket.bucket_pos:
+                # decide which bucket this directory entry should point to
+                split_point = 2 ** (bucket.local_depth - 1)
+                if i % (2 ** bucket.local_depth) < split_point:
+                    self.indexfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                    self.indexfile.write(struct.pack(self.DIR_FORMAT, bucket.bucket_pos))
+                else:
+                    self.indexfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                    self.indexfile.write(struct.pack(self.DIR_FORMAT, new_pos))
+
+        # 5. reinsert all records into correct bucket
+        for rec_offset in records_to_redistribute:
+            # get key of record from data file
+            self.file.seek(rec_offset)
+            record = Record.unpack(self.file.read(Record.RECORD_SIZE))
+            bucket_to_insert = self.get_bucket(record.key)
+            bucket_to_insert.insert(rec_offset, self.indexfile, self.global_depth)
+
+
