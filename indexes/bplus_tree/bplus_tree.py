@@ -1,4 +1,4 @@
-from Record import Record, TableMetadata
+from core.record import Table, Record
 
 class BPlusTreeUnclusteredIndex:
     def __init__(self, table_metadata: TableMetadata, index_column: str):

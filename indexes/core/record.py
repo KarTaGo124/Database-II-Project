@@ -63,7 +63,14 @@ class Record:
 
     def _process_value(self, value, field_type: str, field_size: int):
         if field_type == "CHAR":
+<<<<<<< HEAD
             return value.ljust(field_size).encode('utf-8')[:field_size]
+=======
+            if isinstance(value, bytes):
+                return value[:field_size].ljust(field_size, b'\x00')
+            else:
+                return str(value).ljust(field_size).encode('utf-8')[:field_size]
+>>>>>>> origin/main
         elif field_type == "INT":
             return int(value)
         elif field_type == "FLOAT":
@@ -112,7 +119,11 @@ class Record:
             value = getattr(self, field_name)
             if field_type == "CHAR" and value:
                 if isinstance(value, bytes):
+<<<<<<< HEAD
                     value = value.decode('utf-8').rstrip('\x00')
+=======
+                    value = value.decode('utf-8').rstrip('\x00').strip()
+>>>>>>> origin/main
             fields.append(f"{field_name}: {value}")
 
         return f"Record({', '.join(fields)})"
@@ -133,3 +144,51 @@ class Record:
             print(f"  {field_name} ({field_type}[{field_size}]): {value}")
 
 
+<<<<<<< HEAD
+=======
+class IndexRecord(Record):
+    def __init__(self, index_field_type: str, index_field_size: int):
+        list_of_types = [
+            ("index_value", index_field_type, index_field_size),
+            ("primary_key", "INT", 4)
+        ]
+        super().__init__(list_of_types, "index_value")
+
+    def set_index_data(self, index_value, primary_key):
+        self.index_value = index_value
+        self.primary_key = primary_key
+
+    @classmethod
+    def unpack(cls, data: bytes, list_of_types: List[Tuple[str, str, int]], key_field: str):
+        index_field_type = list_of_types[0][1]
+        index_field_size = list_of_types[0][2]
+        record = cls(index_field_type, index_field_size)
+        unpacked_data = struct.unpack(record.FORMAT, data)
+
+        data_index = 0
+        for field_name, field_type, field_size in record.value_type_size:
+            if field_type == "ARRAY":
+                array_values = unpacked_data[data_index:data_index + field_size]
+                setattr(record, field_name, list(array_values))
+                data_index += field_size
+            else:
+                setattr(record, field_name, unpacked_data[data_index])
+                data_index += 1
+
+        return record
+
+
+class IndexTable:
+    @staticmethod
+    def create_index_table(field_name: str, field_type: str, field_size: int):
+        return Table(
+            table_name=f"{field_name}_index",
+            sql_fields=[
+                ("index_value", field_type, field_size),
+                ("primary_key", "INT", 4)
+            ],
+            key_field="index_value"
+        )
+
+
+>>>>>>> origin/main
