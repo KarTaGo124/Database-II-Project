@@ -1,1 +1,0 @@
-# ISAM Sparse Index
