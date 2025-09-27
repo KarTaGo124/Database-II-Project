@@ -804,7 +804,7 @@ class ISAMPrimaryIndex:
 
     # Operaciones principales
     
-    def add(self, record):
+    def insert(self, record):
         if self.search(record.get_key()) is not None:
             raise ValueError(f"Primary key {record.get_key()} already exists")
 
