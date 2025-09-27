@@ -15,7 +15,6 @@ class SequentialFile:
         self.read_count = 0
         self.write_count = 0
 
-        # Asegurar que el campo active está en extra_fields
         if not any(field[0] == 'active' for field in self.list_of_types):
             raise ValueError("La tabla debe tener un campo 'active' de tipo BOOL en extra_fields")
 
@@ -95,7 +94,7 @@ class SequentialFile:
         
         open(self.aux_file, 'wb').close()
 
-    def add(self, registro: Record):
+    def insert(self, registro: Record):
         record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
         
         with open(self.main_file, 'rb') as f:
@@ -125,7 +124,7 @@ class SequentialFile:
 
         return True, f"Registro con clave {registro.get_key()} insertado en aux_file.", registro
 
-    def remove(self, key):
+    def delete(self, key):
         record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
         
         with open(self.main_file, 'r+b') as f:
@@ -211,7 +210,7 @@ class SequentialFile:
         
         return False, f"Error: Registro con clave {key} no existe.", None
 
-    def rangeSearch(self, begin_key, end_key):
+    def range_search(self, begin_key, end_key):
         results = []
         all_records = self.show_all_records_from_main_and_aux()
         
