@@ -4,8 +4,11 @@ import os
 import shutil
 import time
 import random
-from .manager import ISAMManager
-from ..core.record import Record, Table
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
+from indexes.isam.manager import ISAMManager
+from indexes.core.record import Record, Table
 
 
 def create_sales_table():
@@ -44,7 +47,7 @@ def load_csv_data(filename, table, limit=None):
 
 
 def clean_data_files():
-    data_dir = os.path.join("indexes", "isam", "data_files")
+    data_dir = os.path.join("data", "test_data")
     if os.path.exists(data_dir):
         shutil.rmtree(data_dir)
 
@@ -58,10 +61,10 @@ def main():
     table = create_sales_table()
 
     # Cargar dataset completo
-    records = load_csv_data('data/sales_dataset_unsorted.csv', table)
+    records = load_csv_data('data/datasets/sales_dataset_unsorted.csv', table)
     print(f"Dataset cargado: {len(records)} registros")
 
-    manager = ISAMManager(table, csv_filename='data/sales_dataset_unsorted.csv')
+    manager = ISAMManager(table, csv_filename='data/datasets/sales_dataset_unsorted.csv')
     manager.add_secondary_index('nombre_producto')
     manager.add_secondary_index('cantidad_vendida')
 
