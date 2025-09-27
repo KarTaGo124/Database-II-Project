@@ -1,1 +1,0 @@
-# ISAM tests package
