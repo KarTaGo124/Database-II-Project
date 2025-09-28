@@ -1,5 +1,6 @@
 import os, struct
-from ..core.record import Record
+from typing import List, Any, Optional
+from ..core.record import Record, Table
 
 BLOCK_FACTOR = 10
 ROOT_INDEX_BLOCK_FACTOR = 8
@@ -24,7 +25,7 @@ class Page:
         return header_data + record_data
 
     @staticmethod
-    def unpack(data: bytes, block_factor=BLOCK_FACTOR, record_size=None, table=None):
+    def unpack(data: bytes, block_factor: int = BLOCK_FACTOR, record_size: Optional[int] = None, table: Optional[Table] = None):
         size, next_page = struct.unpack(Page.HEADER_FORMAT, data[:Page.HEADER_SIZE])
         offset = Page.HEADER_SIZE
         records = []
@@ -34,7 +35,7 @@ class Page:
             offset += record_size
         return Page(records, next_page, block_factor, record_size)
     
-    def insert_sorted(self, record):
+    def insert_sorted(self, record: Record):
         left, right = 0, len(self.records)
         while left < right:
             mid = (left + right) // 2
@@ -49,7 +50,7 @@ class Page:
     def is_full(self):
         return len(self.records) >= self.block_factor
     
-    def remove_record(self, key_value):
+    def remove_record(self, key_value: Any):
         left, right = 0, len(self.records) - 1
 
         while left <= right:
@@ -308,10 +309,12 @@ class ISAMPrimaryIndex:
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
     DATA_START_OFFSET = HEADER_SIZE
 
-    def __init__(self, table, filename="datos.dat", root_index_file=None, leaf_index_file=None, free_list_file=None,
-                 block_factor=None, root_index_block_factor=None, leaf_index_block_factor=None, consolidation_threshold=None):
+    def __init__(self, table: Table, filename: str = "datos.dat", root_index_file: Optional[str] = None, leaf_index_file: Optional[str] = None, free_list_file: Optional[str] = None,
+                 block_factor: Optional[int] = None, root_index_block_factor: Optional[int] = None, leaf_index_block_factor: Optional[int] = None, consolidation_threshold: Optional[int] = None):
         self.table = table
         self.filename = filename
+        # Create record template once for consistent access to RECORD_SIZE
+        self.record_template = table.record
 
         base_dir = os.path.dirname(filename)
 
@@ -335,10 +338,10 @@ class ISAMPrimaryIndex:
         self.next_root_index_page_number = 0
         self.next_leaf_index_page_number = 0
 
-    def _create_initial_files(self, record):
+    def _create_initial_files(self, record: Record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 0))
-            page = Page([record], block_factor=self.block_factor, record_size=self.table.record_size)
+            page = Page([record], block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
             file.write(page.pack())
 
         with open(self.leaf_index_file, "wb") as file:
@@ -370,13 +373,13 @@ class ISAMPrimaryIndex:
     # Escritura y lectura de páginas e índices
     
     def _read_page(self, file, page_num):
-        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+        page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
-        return Page.unpack(file.read(page_size), self.block_factor, self.table.record_size, self.table)
+        return Page.unpack(file.read(page_size), self.block_factor, self.record_template.RECORD_SIZE, self.table)
 
     def _write_page(self, file, page_num, page):
-        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+        page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
         file.write(page.pack())
@@ -489,13 +492,13 @@ class ISAMPrimaryIndex:
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
 
-        left_page = Page(left_records, block_factor=self.block_factor, record_size=self.table.record_size)
+        left_page = Page(left_records, block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
         self._write_page(file, page_num, left_page)
 
         file.seek(0, 2)
-        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+        page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         new_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
-        right_page = Page(right_records, block_factor=self.block_factor, record_size=self.table.record_size)
+        right_page = Page(right_records, block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
         file.write(right_page.pack())
 
         separator_key = right_records[0].get_key()
@@ -512,13 +515,13 @@ class ISAMPrimaryIndex:
         left_records = all_records[:mid_point]
         right_records = all_records[mid_point:]
 
-        left_page = Page(left_records, block_factor=self.block_factor, record_size=self.table.record_size)
+        left_page = Page(left_records, block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
         self._write_page(file, page_num, left_page)
 
         file.seek(0, 2)
-        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+        page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         new_data_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
-        right_page = Page(right_records, block_factor=self.block_factor, record_size=self.table.record_size)
+        right_page = Page(right_records, block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
         file.write(right_page.pack())
         self.next_page_number = new_data_page_num + 1
 
@@ -570,11 +573,11 @@ class ISAMPrimaryIndex:
                 new_overflow_page_num = free_page_num
             else:
                 file.seek(0, 2)
-                page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+                page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
                 new_overflow_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
                 self.next_page_number = new_overflow_page_num + 1
 
-            new_overflow_page = Page([new_record], block_factor=self.block_factor, record_size=self.table.record_size)
+            new_overflow_page = Page([new_record], block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
             self._write_page(file, new_overflow_page_num, new_overflow_page)
 
             page_found.next_page = new_overflow_page_num
@@ -694,7 +697,7 @@ class ISAMPrimaryIndex:
                 if self._is_overflow_page(next_page_num):
                     self.free_list_stack.push_free_page(next_page_num)
                 else:
-                    empty_page = Page(block_factor=self.block_factor, record_size=self.table.record_size)
+                    empty_page = Page(block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
                     self._write_page(file, next_page_num, empty_page)
 
     def _remove_page_from_chain(self, file, start_page_num, page_to_remove):
@@ -723,7 +726,7 @@ class ISAMPrimaryIndex:
             if file_size < self.DATA_START_OFFSET:
                 return all_records
 
-            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+            page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
             num_pages = (file_size - self.DATA_START_OFFSET) // page_size
             visited = set()
 
@@ -775,7 +778,7 @@ class ISAMPrimaryIndex:
             if file_size < self.DATA_START_OFFSET:
                 return False
 
-            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+            page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
             total_pages = (file_size - self.DATA_START_OFFSET) // page_size
 
             if total_pages == 0:
@@ -804,7 +807,7 @@ class ISAMPrimaryIndex:
 
     # Operaciones principales
     
-    def insert(self, record):
+    def insert(self, record: Record):
         if self.search(record.get_key()) is not None:
             raise ValueError(f"Primary key {record.get_key()} already exists")
 
@@ -978,7 +981,7 @@ class ISAMPrimaryIndex:
 
                     with open(self.filename, "rb") as data_file:
                         data_file_size = os.path.getsize(self.filename)
-                        page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+                        page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
                         num_data_pages = (data_file_size - self.DATA_START_OFFSET) // page_size
                         
                         for i in range(num_leaf_pages):
@@ -1044,7 +1047,7 @@ class ISAMPrimaryIndex:
             if file_size < self.DATA_START_OFFSET:
                 return results
 
-            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+            page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
             num_pages = (file_size - self.DATA_START_OFFSET) // page_size
             visited = set()
 
@@ -1073,7 +1076,7 @@ class ISAMPrimaryIndex:
                 print("  (archivo vacío)")
                 return
 
-            page_size = Page.HEADER_SIZE + self.block_factor * self.table.record_size
+            page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
             num_pages = (file_size - self.DATA_START_OFFSET) // page_size
             visited = set()
 
