@@ -1,43 +1,30 @@
-import csv
-import os
-import struct
-from typing import List
+"""B+ Tree Based for clustered and unclustered indexes.
+"""
 
-class TableMetadata:
-    def __init__(self, table_name: str, list_of_types: List[List[str, str, int]], key_field: str):
-        self.table_name = table_name
-        self.list_of_types = list_of_types
-        self.key_field = key_field
-        self.record = Record(list_of_types, key_field)
-        self.record_size = self.record.RECORD_SIZE + 1 # +1 por el campo active
+class Node:
+    def __init__(self, is_leaf: bool=False):
+        self.is_leaf = is_leaf
+        self.keys = []
+        self.parent = None  # Parent node
+        self.id = None  # Unique identifier for the node (e.g., page number)
+    def is_full(self, max_keys: int) -> bool:
+        return len(self.keys) > max_keys
     
-class Record:
-    FORMAT = ""
-    RECORD_SIZE = 0
-    key_field = "" # clave para el ordenamiento
-    value_type_size = [] # es una tupla de 3 de (nombrevariable, tipo, size) para cada campo
+    def is_underflow(self, min_keys:int)-> bool:
+        return len(self.keys) < min_keys
 
-    def __init__(self, list_of_types: List[List[str, str, int]], key_fieldd: str):
-        self.FORMAT = making_format(list_of_types)
-        self.RECORD_SIZE = struct.calcsize(self.FORMAT)
-        self.value_type_size = [(element[0], element[1], element[2]) for element in list_of_types]
-        self.key_field = key_fieldd
-        self.active = True
+class LeafNode(Node):
+    def __init__(self):
+        super().__init__(is_leaf=True)
+        self.values = []  # List of RecordPointer objects
+        self.previous = None  # Pointer to previous leaf node
+        self.next = None  # Pointer to next leaf node
 
-    def pack(self) -> bytes:
-        procesados = []
-        for item in self.value_type_size:
-            valor = getattr(self, item[0])
-            procesados.append(procesar_dato(valor, item[1],item[2]))
 
-        procesados.append(self.active)
-        format_with_active = self.FORMAT + "?"
-        return struct.pack(format_with_active, *procesados)
+class InternalNode(Node):
+    def __init__(self):
+        super().__init__(is_leaf=False)
+        self.children = []  # Pointers to child nodes
 
-    @staticmethod
-    def unpack(data):
-        fields = struct.unpack(Record.FORMAT, data)
-        return Record() # mori falta hacer esto bien
-    
-    def get_key(self):
-        return getattr(self, self.key_field) #retorna dinamicamente el valor del campo clave
+
+
