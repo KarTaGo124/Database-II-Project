@@ -28,3 +28,24 @@ class ClusteredInternalNode(Node):
     def __init__(self):
         super().__init__(is_leaf=False)
         self.children = []  # pointers to child nodes
+        
+class BPlusTreeClusteredIndex:
+    def __init__(self, order: int, key_column: str, file_path: str, record_class):
+        self.key_column = key_column
+        self.record_class = record_class
+        self.root = ClusteredLeafNode()
+        self.order = order
+        self.max_keys = order - 1
+        self.min_keys = (order + 1) // 2 - 1
+        self.file_path = file_path
+        self.first_leaf = self.root
+        
+        # for pages
+        self.pages = {}
+        self.next_page_id = 1
+        self.root_page_id = 0
+        self.root.id = 0
+        self.pages[0] = self.root
+        
+        # for existen b+tree
+        self.load_tree()
