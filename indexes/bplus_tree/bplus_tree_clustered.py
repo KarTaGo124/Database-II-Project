@@ -144,3 +144,27 @@ class BPlusTreeClusteredIndex:
             right_sibling = parent.children[leaf_index + 1]
             if isinstance(right_sibling, ClusteredLeafNode):
                 self.merge_leaf_with_right(leaf, right_sibling, parent, leaf_index)
+    
+    def borrow_from_left_leaf(self, leaf: ClusteredLeafNode, left_sibling: ClusteredLeafNode, 
+                              parent: ClusteredInternalNode, leaf_index: int):
+        # move last key and record from left sibling to beginning of leaf
+        borrowed_key = left_sibling.keys.pop()
+        borrowed_record = left_sibling.records.pop()
+        
+        leaf.keys.insert(0, borrowed_key)
+        leaf.records.insert(0, borrowed_record)
+        
+        # update parent key
+        parent.keys[leaf_index - 1] = leaf.keys[0]
+
+    def borrow_from_right_leaf(self, leaf: ClusteredLeafNode, right_sibling: ClusteredLeafNode,
+                               parent: ClusteredInternalNode, leaf_index: int):
+        # move first key and record from right sibling to end of leaf
+        borrowed_key = right_sibling.keys.pop(0)
+        borrowed_record = right_sibling.records.pop(0)
+        
+        leaf.keys.append(borrowed_key)
+        leaf.records.append(borrowed_record)
+        
+        # update parent key
+        parent.keys[leaf_index] = right_sibling.keys[0] if right_sibling.keys else borrowed_key
