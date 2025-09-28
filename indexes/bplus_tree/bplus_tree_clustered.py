@@ -237,3 +237,30 @@ class BPlusTreeClusteredIndex:
         # promote the first key of new leaf to parent
         promote_key = new_leaf.keys[0]
         self.promote_key(leaf, promote_key, new_leaf)
+        
+    def split_internal(self, internal: ClusteredInternalNode):
+        mid = len(internal.keys) // 2
+        promote_key = internal.keys[mid]
+        
+        new_internal = ClusteredInternalNode()
+        
+        # move keys and children to new internal node
+        new_internal.keys = internal.keys[mid + 1:]
+        new_internal.children = internal.children[mid + 1:]
+        new_internal.parent = internal.parent
+        
+        # update parent pointers for moved children
+        for child in new_internal.children:
+            child.parent = new_internal
+        
+        # keep first half in original internal node
+        internal.keys = internal.keys[:mid]
+        internal.children = internal.children[:mid + 1]
+        
+        # assign page ID to new node and add to pages
+        new_internal.id = self.next_page_id
+        self.pages[self.next_page_id] = new_internal
+        self.next_page_id += 1
+        
+        # promote middle key to parent
+        self.promote_key(internal, promote_key, new_internal)
