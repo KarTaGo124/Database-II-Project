@@ -1,11 +1,5 @@
-from core.record import Table, Record
-
-import pickle
-import os
-from typing import Any, List, Optional, Tuple, Union
-from dataclasses import dataclass
-import bisect
-
+"""B+ Tree Based for clustered and unclustered indexes.
+"""
 class BPlusTreeUnclusteredIndex:
     def __init__(self, table_metadata: TableMetadata, index_column: str):
         self.index_column = index_column
@@ -18,8 +12,8 @@ class Node:
         self.keys = []
         self.parent = None  # Parent node
         self.id = None  # Unique identifier for the node (e.g., page number)
-    
-    
+    def is_full(self, max_keys: int) -> bool:
+        return len(self.keys) > max_keys
 
 class LeafNode(Node):
     def __init__(self, is_leaf):
