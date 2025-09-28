@@ -61,4 +61,45 @@ class BPlusTreeUnclusteredIndex:
         leaf.values = leaf.values[:mid]
         promote_key = new_leaf.keys[0]
         self.promote_key(leaf, promote_key, new_leaf)
+        
+    def promote_key(self, left_child:Node, Key: Any, right_child:Node):
+        if left_child.parent is None:
+            new_root = InternalNode()
+            new_root.keys = [Key]
+            new_root.children = [left_child, right_child]
+            left_child.parent = new_root
+            right_child.parent = new_root
+            self.root = new_root
+        else:
+            parent = left_child.parent
+            pos = bisect.bisect_left(parent.keys, Key)
+            parent.keys.insert(pos, Key)
+            parent.children.insert(pos+1, right_child)
+            right_child.parent = parent
+            
+            if parent.is_full(self.max_keys):
+                self.split_internal(parent)
+    
+    def split_internal(self, internal:InternalNode):
+        mid = len(internal.keys) // 2
+        promote_key = internal.keys[mid]
+        new_internal = InternalNode()
+        new_internal.keys = internal.keys[mid +1:]
+        new_internal.children = internal.children[mid + 1:]
+        for child in new_internal.children:
+            child.parent = new_internal
+        internal.keys = internal.keys[:mid]
+        internal.children = internal.children[:mid+1]
+        self.promote_key(internal, promote_key, new_internal)
+    
+    def find_leaf(self, key: Any) ->LeafNode:
+        current = self.root
+        while not current.is_leaf:
+            pos = bisect.bisect_left(current.keys, key)
+            current = current.children[pos]
+        return current
+    
+    
+        
+        
     
