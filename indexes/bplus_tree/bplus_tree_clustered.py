@@ -264,3 +264,41 @@ class BPlusTreeClusteredIndex:
         
         # promote middle key to parent
         self.promote_key(internal, promote_key, new_internal)
+
+    def promote_key(self, left_child: Node, key: Any, right_child: Node):
+        if left_child.parent is None:
+            # create new root
+            new_root = ClusteredInternalNode()
+            new_root.keys = [key]
+            new_root.children = [left_child, right_child]
+            left_child.parent = new_root
+            right_child.parent = new_root
+            
+            # update root references
+            self.root = new_root
+            new_root.id = self.next_page_id
+            self.pages[self.next_page_id] = new_root
+            self.next_page_id += 1
+            self.root_page_id = new_root.id
+            
+        else:
+            # insert in  parent
+            parent = left_child.parent
+            pos = bisect.bisect_left(parent.keys, key)
+            parent.keys.insert(pos, key)
+            parent.children.insert(pos + 1, right_child)
+            right_child.parent = parent
+            
+            # Check if parent is now full
+            if parent.is_full(self.max_keys):
+                self.split_internal(parent)
+                
+    def find_leaf_node(self, key: Any) -> ClusteredLeafNode:
+        current = self.root
+        while isinstance(current, ClusteredInternalNode):
+            pos = bisect.bisect_right(current.keys, key)
+            current = current.children[pos]
+        return current
+
+    def get_key_value(self, record: 'Record') -> Any:
+        return record.get_field_value(self.key_column)
