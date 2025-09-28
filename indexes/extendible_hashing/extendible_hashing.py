@@ -32,17 +32,78 @@ class Bucket:
         return records
 
     def insert(self, index_record: IndexRecord, bucketfile):
-        """ Inserts a new IndexRecord into the bucket. """
+        """ Inserts a new IndexRecord into the bucket, reusing tombstone slots if available. """
         packed_record = index_record.pack()
-        # Write the packed record to the first available slot
-        bucketfile.seek(self.bucket_pos + self.HEADER_SIZE + (self.size * self.index_record_size))
+        tombstone = b'\x00' * self.index_record_size
+
+        # Find the first available slot (either tombstone or at the end)
+        insert_position = None
+
+        # Check existing slots for tombstones to reuse
+        for i in range(self.size):
+            slot_pos = self.bucket_pos + self.HEADER_SIZE + (i * self.index_record_size)
+            bucketfile.seek(slot_pos)
+            existing_data = bucketfile.read(self.index_record_size)
+
+            if existing_data == tombstone:
+                insert_position = slot_pos
+                break
+
+        # If no tombstone slot found and we have space, add at the end
+        if insert_position is None:
+            if self.size < BLOCK_FACTOR:
+                insert_position = self.bucket_pos + self.HEADER_SIZE + (self.size * self.index_record_size)
+                self.size += 1
+            elif insert_position is None:
+            # Bucket is full and no tombstones available
+                return False
+
+        # Write the packed record to the determined position
+        bucketfile.seek(insert_position)
         bucketfile.write(packed_record)
 
         # Update the bucket's header
-        self.size += 1
         bucketfile.seek(self.bucket_pos)
         bucketfile.write(struct.pack(self.HEADER_FORMAT, self.local_depth, self.size))
         return True
+
+    def delete_record(self, secondary_key, primary_key, bucketfile, index_record_template):
+        """ Deletes a specific IndexRecord from the bucket by marking it as tombstone. """
+        if self.size == 0:
+            return False
+
+        tombstone = b'\x00' * self.index_record_size
+        found = False
+
+        for i in range(self.size):
+            record_pos = self.bucket_pos + self.HEADER_SIZE + (i * self.index_record_size)
+            bucketfile.seek(record_pos)
+            packed_record = bucketfile.read(self.index_record_size)
+
+            # skip deleted records
+            if packed_record == tombstone:
+                continue
+
+            try:
+                # Unpack and check if this is the record to delete
+                unpacked = IndexRecord.unpack(packed_record, index_record_template.value_type_size, "index_value")
+
+                stored_secondary_key = unpacked.index_value
+                if isinstance(stored_secondary_key, bytes):
+                    stored_secondary_key = stored_secondary_key.decode('utf-8').strip('\x00')
+
+                # Check if both secondary key and primary key match
+                if stored_secondary_key == secondary_key and unpacked.primary_key == primary_key:
+                    # Mark as tombstone
+                    bucketfile.seek(record_pos)
+                    bucketfile.write(tombstone)
+                    found = True
+                    break
+
+            except struct.error:
+                continue
+
+        return found
 
     def clear(self, bucketfile):
         """ Resets the bucket's size"""
@@ -102,7 +163,7 @@ class ExtendableHashing:
     def _get_bucket_from_key(self, key):
         """ Hashes a key to find and return the corresponding Bucket object. """
         hash_val = hash(key)
-        dir_index =  hash_val % 2**self.global_depth
+        dir_index = hash_val % 2 ** self.global_depth
 
         # Find the bucket's position from the directory
         self.dirfile.seek(self.HEADER_SIZE + dir_index * self.DIR_SIZE)
@@ -158,13 +219,31 @@ class ExtendableHashing:
 
         bucket = self._get_bucket_from_key(secondary_key)
 
-        # If bucket has space, insert and we're done
-        if bucket.size < BLOCK_FACTOR:
-            bucket.insert(index_entry, self.bucketfile)
-            return
+        # Try to insert in the bucket (it will reuse tombstone slots or add at end if space)
+        # we dont check size bc size no longer size, it just tracks last position to insert if space
+        if bucket.insert(index_entry, self.bucketfile):
+            return ;
 
-        # If bucket is full, we must split
+        # If insertion failed, bucket is truly full (no tombstones and size == BLOCK_FACTOR)
         self._split_bucket(bucket, index_entry)
+
+
+    def delete(self, secondary_key):
+        """
+        Deletes index entries based on secondary key """
+        bucket = self._get_bucket_from_key(secondary_key)
+        # Delete all records with matching secondary key
+        deleted_count = 0
+
+        # First, find all matching primary keys
+        matching_pks = self.search(secondary_key)
+
+        # Delete each matching record
+        for pk in matching_pks:
+            if bucket.delete_record(secondary_key, pk, self.bucketfile, self.index_record_template):
+                deleted_count += 1
+
+        return deleted_count
 
     def _split_bucket(self, bucket: Bucket, new_record: IndexRecord):
         """ Handles the logic of splitting a full bucket. """
