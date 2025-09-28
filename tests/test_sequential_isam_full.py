@@ -90,8 +90,8 @@ def test_sequential_isam_comprehensive():
     start_time = time.time()
     for test_id in test_ids:
         result = db_manager.search("sales", test_id)
-        if result:
-            print(f"   ID {test_id}: {result.product_name.decode().strip()}")
+        if result.data:
+            print(f"   ID {test_id}: {result.data.product_name.decode().strip()}")
         else:
             print(f"   ID {test_id}: No encontrado")
     search_time = time.time() - start_time
@@ -103,9 +103,9 @@ def test_sequential_isam_comprehensive():
 
     for product in test_products:
         search_name = product.encode().ljust(50, b'\x00')
-        result = db_manager.search_by_secondary("sales", "product_name", search_name)
-        if result and len(result) > 0:
-            print(f"   '{product}': {len(result)} resultados, primer ID: {result[0].sale_id}")
+        result = db_manager.search("sales", search_name, "product_name")
+        if result.data and len(result.data) > 0:
+            print(f"   '{product}': {len(result.data)} resultados, primer ID: {result.data[0].sale_id}")
         else:
             print(f"   '{product}': No encontrado")
 
@@ -114,9 +114,9 @@ def test_sequential_isam_comprehensive():
     test_quantities = [1, 5, 10, 20, 999]
 
     for qty in test_quantities:
-        result = db_manager.search_by_secondary("sales", "quantity", qty)
-        if result and len(result) > 0:
-            print(f"   Cantidad {qty}: {len(result)} resultados")
+        result = db_manager.search("sales", qty, "quantity")
+        if result.data and len(result.data) > 0:
+            print(f"   Cantidad {qty}: {len(result.data)} resultados")
         else:
             print(f"   Cantidad {qty}: No encontrado")
 
@@ -128,7 +128,7 @@ def test_sequential_isam_comprehensive():
         start_time = time.time()
         results = db_manager.range_search("sales", start, end)
         range_time = time.time() - start_time
-        print(f"   Range ({start}-{end}): {len(results)} resultados en {range_time:.4f}s")
+        print(f"   Range ({start}-{end}): {len(results.data) if results.data else 0} resultados en {range_time:.4f}s")
 
     # Test deletes
     print("\n10. Test eliminaciones...")
@@ -136,11 +136,11 @@ def test_sequential_isam_comprehensive():
 
     for del_id in delete_ids:
         success = db_manager.delete("sales", del_id)
-        if success:
+        if success.data:
             print(f"   Eliminado ID {del_id}")
             # Verificar que ya no existe
             result = db_manager.search("sales", del_id)
-            if result is None:
+            if result.data is None:
                 print(f"     Verificado: ID {del_id} ya no existe")
             else:
                 print(f"     ERROR: ID {del_id} aún existe después de eliminar")
