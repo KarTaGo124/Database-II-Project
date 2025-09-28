@@ -49,3 +49,10 @@ class BPlusTreeClusteredIndex:
         
         # for existen b+tree
         self.load_tree()
+    def search(self, key: Any) -> Optional['Record']:
+        leaf_node = self.find_leaf_node(key)
+        pos = bisect.bisect_left(leaf_node.keys, key)
+        
+        if pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
+            return leaf_node.records[pos] 
+        return None
