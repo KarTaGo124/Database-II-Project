@@ -33,3 +33,16 @@ class BPlusTreeUnclusteredIndex:
         self.insert_recursive(self.root, key, record_pointer)
         self.save_tree()
     
+    def inser_recursive(self, node: Node, key: Any, record_pointer: RecordPointer):
+        if node.is_leaf:
+            pos = bisect.bisect_left(node.keys, key)
+            node.keys.insert(pos, key)
+            node.values.insert(pos, record_pointer)
+            if node.is_full(self.max_keys):
+                self.split_leaf(node)
+        else:
+            index = bisect.bisect_right(node.keys, key)
+            child = node.values[index]
+            self.insert_recursive(child, key, record_pointer)
+            if child.is_full(self.max_keys):
+                self.split_internal(child)

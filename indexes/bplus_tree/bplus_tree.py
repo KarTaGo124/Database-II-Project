@@ -1,10 +1,5 @@
 """B+ Tree Based for clustered and unclustered indexes.
 """
-class BPlusTreeUnclusteredIndex:
-    def __init__(self, table_metadata: TableMetadata, index_column: str):
-        self.index_column = index_column
-        self.root = None  # Root node of the B+ tree
-        self.order = 4  # Maximum number of children for internal nodes
 
 class Node:
     def __init__(self, is_leaf: bool):
@@ -18,8 +13,9 @@ class Node:
 class LeafNode(Node):
     def __init__(self, is_leaf):
         super().__init__()
-        self.children = []  # List of RecordPointer objects
-
+        self.values = []  # List of RecordPointer objects
+        self.previous = None  # Pointer to previous leaf node
+        self.next = None  # Pointer to next leaf node
 
 
 class InternalNode(Node):
@@ -27,9 +23,6 @@ class InternalNode(Node):
         super().__init__()
         self.children = []  # Pointers to child nodes
 
-class RecordPointer:
-    def __init__(self, page_number: int, slot_number: int):
-        self.page_number = page_number
-        self.slot_number = slot_number
+
 
 
