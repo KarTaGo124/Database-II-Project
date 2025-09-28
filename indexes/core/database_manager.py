@@ -1,6 +1,7 @@
 import os
 from typing import Dict, Any, List, Tuple, Optional
 from .record import Table, Record
+from .performance_tracker import OperationResult, PerformanceTracker
 
 
 class DatabaseManager:
@@ -77,31 +78,64 @@ class DatabaseManager:
         table_info = self.tables[table_name]
         primary_index = table_info["primary_index"]
 
-        primary_index.insert(record)
+        primary_result = primary_index.insert(record)
+
+        total_reads = primary_result.disk_reads
+        total_writes = primary_result.disk_writes
+        total_time = primary_result.execution_time_ms
 
         for field_name, index_info in table_info["secondary_indexes"].items():
             secondary_index = index_info["index"]
-            secondary_index.insert(record)
+            secondary_result = secondary_index.insert(record)
+            total_reads += secondary_result.disk_reads
+            total_writes += secondary_result.disk_writes
+            total_time += secondary_result.execution_time_ms
 
-    def search(self, table_name: str, key_value):
+        return OperationResult(primary_result.data, total_time, total_reads, total_writes)
+
+    def search(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
             raise ValueError(f"Table {table_name} does not exist")
 
         table_info = self.tables[table_name]
-        primary_index = table_info["primary_index"]
-        return primary_index.search(key_value)
 
-    def search_by_secondary(self, table_name: str, field_name: str, value):
-        if table_name not in self.tables:
-            raise ValueError(f"Table {table_name} does not exist")
+        if field_name is None:
+            primary_index = table_info["primary_index"]
+            return primary_index.search(value)
 
-        table_info = self.tables[table_name]
+        elif field_name in table_info["secondary_indexes"]:
+            secondary_index = table_info["secondary_indexes"][field_name]["index"]
+            return secondary_index.search(value)
 
-        if field_name not in table_info["secondary_indexes"]:
-            raise ValueError(f"No index on field {field_name}")
+        else:
+            table = table_info["table"]
+            field_info = self._get_field_info(table, field_name)
+            if not field_info:
+                raise ValueError(f"Field {field_name} not found in table {table_name}")
 
-        secondary_index = table_info["secondary_indexes"][field_name]["index"]
-        return secondary_index.search(value)
+            performance = PerformanceTracker()
+            performance.start_operation()
+
+            primary_index = table_info["primary_index"]
+
+            if hasattr(primary_index, 'scanAll'):
+                all_records = primary_index.scanAll()
+                for _ in all_records:
+                    performance.track_read()
+            else:
+                raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
+
+            matching_records = []
+            for record in all_records:
+                record_value = getattr(record, field_name, None)
+                if record_value is not None:
+                    if hasattr(record_value, 'decode'):
+                        record_value = record_value.decode().strip()
+
+                    if record_value == value:
+                        matching_records.append(record)
+
+            return performance.end_operation(matching_records)
 
     def range_search(self, table_name: str, start_key, end_key, field_name: str = None):
         if table_name not in self.tables:
@@ -112,29 +146,124 @@ class DatabaseManager:
         if field_name is None:
             primary_index = table_info["primary_index"]
             return primary_index.range_search(start_key, end_key)
-        else:
-            if field_name not in table_info["secondary_indexes"]:
-                raise ValueError(f"No index on field {field_name}")
 
+        elif field_name in table_info["secondary_indexes"]:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
             return secondary_index.range_search(start_key, end_key)
 
-    def delete(self, table_name: str, key_value):
+        else:
+            table = table_info["table"]
+            field_info = self._get_field_info(table, field_name)
+            if not field_info:
+                raise ValueError(f"Field {field_name} not found in table {table_name}")
+
+            performance = PerformanceTracker()
+            performance.start_operation()
+
+            primary_index = table_info["primary_index"]
+
+            if hasattr(primary_index, 'scanAll'):
+                all_records = primary_index.scanAll()
+                for _ in all_records:
+                    performance.track_read()
+            else:
+                raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
+
+            matching_records = []
+            for record in all_records:
+                record_value = getattr(record, field_name, None)
+                if record_value is not None:
+                    if hasattr(record_value, 'decode'):
+                        record_value = record_value.decode().strip()
+
+                    try:
+                        if start_key <= record_value <= end_key:
+                            matching_records.append(record)
+                    except TypeError:
+                        if str(start_key) <= str(record_value) <= str(end_key):
+                            matching_records.append(record)
+
+            matching_records.sort(key=lambda r: getattr(r, field_name))
+            return performance.end_operation(matching_records)
+
+    def delete(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
             raise ValueError(f"Table {table_name} does not exist")
 
         table_info = self.tables[table_name]
-        primary_index = table_info["primary_index"]
 
-        record = primary_index.search(key_value)
-        if record is None:
-            return False
+        if field_name is None:
+            primary_index = table_info["primary_index"]
 
-        for field_name, index_info in table_info["secondary_indexes"].items():
-            secondary_index = index_info["index"]
-            secondary_index.delete(record)
+            search_result = primary_index.search(value)
+            if search_result.data is None:
+                return OperationResult(False, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
 
-        return primary_index.delete(key_value)
+            record = search_result.data
+            total_reads = search_result.disk_reads
+            total_writes = search_result.disk_writes
+            total_time = search_result.execution_time_ms
+
+            for fname, index_info in table_info["secondary_indexes"].items():
+                secondary_index = index_info["index"]
+                secondary_result = secondary_index.delete(record)
+                total_reads += secondary_result.disk_reads
+                total_writes += secondary_result.disk_writes
+                total_time += secondary_result.execution_time_ms
+
+            delete_result = primary_index.delete(value)
+            total_reads += delete_result.disk_reads
+            total_writes += delete_result.disk_writes
+            total_time += delete_result.execution_time_ms
+
+            return OperationResult(delete_result.data, total_time, total_reads, total_writes)
+
+        else:
+            search_result = self.search(table_name, value, field_name)
+
+            if not search_result.data:
+                return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
+
+            deleted_count = 0
+            total_reads = search_result.disk_reads
+            total_writes = search_result.disk_writes
+            total_time = search_result.execution_time_ms
+
+            records_to_delete = search_result.data if isinstance(search_result.data, list) else [search_result.data]
+
+            for record in records_to_delete:
+                delete_result = self.delete(table_name, record.get_key())
+                if delete_result.data:
+                    deleted_count += 1
+                total_reads += delete_result.disk_reads
+                total_writes += delete_result.disk_writes
+                total_time += delete_result.execution_time_ms
+
+            return OperationResult(deleted_count, total_time, total_reads, total_writes)
+
+    def range_delete(self, table_name: str, start_key, end_key, field_name: str = None):
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} does not exist")
+
+        search_result = self.range_search(table_name, start_key, end_key, field_name)
+
+        if not search_result.data:
+            return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
+
+        deleted_count = 0
+        total_reads = search_result.disk_reads
+        total_writes = search_result.disk_writes
+        total_time = search_result.execution_time_ms
+
+        for record in search_result.data:
+            delete_result = self.delete(table_name, record.get_key())
+            if delete_result.data:
+                deleted_count += 1
+            total_reads += delete_result.disk_reads
+            total_writes += delete_result.disk_writes
+            total_time += delete_result.execution_time_ms
+
+        return OperationResult(deleted_count, total_time, total_reads, total_writes)
 
     def drop_index(self, table_name: str, field_name: str):
         if table_name not in self.tables:
@@ -286,3 +415,42 @@ class DatabaseManager:
             raise NotImplementedError(f"R-Tree secondary index not implemented yet")
 
         raise NotImplementedError(f"Secondary index type {index_type} not implemented yet")
+
+    def get_last_operation_metrics(self, table_name: str, index_type: str = "primary", field_name: str = None):
+        if table_name not in self.tables:
+            return None
+
+        table_info = self.tables[table_name]
+
+        if index_type == "primary":
+            index = table_info["primary_index"]
+        elif index_type == "secondary" and field_name:
+            if field_name not in table_info["secondary_indexes"]:
+                return None
+            index = table_info["secondary_indexes"][field_name]["index"]
+        else:
+            return None
+
+        if hasattr(index, 'performance') and hasattr(index.performance, 'last_result'):
+            return index.performance.last_result
+        return None
+
+    def extract_metrics_from_result(self, result):
+        if isinstance(result, OperationResult):
+            return {
+                "execution_time_ms": result.execution_time_ms,
+                "disk_reads": result.disk_reads,
+                "disk_writes": result.disk_writes,
+                "total_disk_accesses": result.total_disk_accesses,
+                "data": result.data
+            }
+        return {"data": result, "execution_time_ms": 0, "disk_reads": 0, "disk_writes": 0, "total_disk_accesses": 0}
+
+    def print_operation_summary(self, result, operation_name: str = "Operation"):
+        if isinstance(result, OperationResult):
+            print(f"{operation_name} completed:")
+            print(f"  Time: {result.execution_time_ms:.2f} ms")
+            print(f"  Disk accesses: {result.total_disk_accesses} (R:{result.disk_reads}, W:{result.disk_writes})")
+        else:
+            print(f"{operation_name} completed (no metrics available)")
+
