@@ -168,3 +168,42 @@ class BPlusTreeClusteredIndex:
         
         # update parent key
         parent.keys[leaf_index] = right_sibling.keys[0] if right_sibling.keys else borrowed_key
+
+    def merge_internal_with_left(self, internal: ClusteredInternalNode, left_sibling: ClusteredInternalNode,
+                                 parent: ClusteredInternalNode, internal_index: int):
+        separator_key = parent.keys[internal_index - 1]
+        
+        left_sibling.keys.append(separator_key)
+        left_sibling.keys.extend(internal.keys)
+        left_sibling.children.extend(internal.children)
+        
+        for child in internal.children:
+            child.parent = left_sibling
+        
+        parent.children.pop(internal_index)
+        parent.keys.pop(internal_index - 1)
+        
+        if internal.id in self.pages:
+            del self.pages[internal.id]
+        
+        if parent != self.root and parent.is_underflow(self.min_keys):
+            self.handle_internal_underflow(parent)
+    def merge_internal_with_right(self, internal: ClusteredInternalNode, right_sibling: ClusteredInternalNode,
+                                  parent: ClusteredInternalNode, internal_index: int):
+        separator_key = parent.keys[internal_index]
+        
+        internal.keys.append(separator_key)
+        internal.keys.extend(right_sibling.keys)
+        internal.children.extend(right_sibling.children)
+        
+        for child in right_sibling.children:
+            child.parent = internal
+        
+        parent.children.pop(internal_index + 1)
+        parent.keys.pop(internal_index)
+        
+        if right_sibling.id in self.pages:
+            del self.pages[right_sibling.id]
+        
+        if parent != self.root and parent.is_underflow(self.min_keys):
+            self.handle_internal_underflow(parent)
