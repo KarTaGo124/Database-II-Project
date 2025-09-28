@@ -46,3 +46,19 @@ class BPlusTreeUnclusteredIndex:
             self.insert_recursive(child, key, record_pointer)
             if child.is_full(self.max_keys):
                 self.split_internal(child)
+    
+    def split_leaf(self, leaf: LeafNode):
+        mid = len(leaf.keys) // 2
+        new_leaf = LeafNode()
+        new_leaf.keys = leaf.keys[mid:]
+        new_leaf.values = leaf.values[mid:]
+        new_leaf.next = leaf.next
+        new_leaf.previous = leaf.previous
+        
+        if leaf.next:
+            leaf.next.previous = new_leaf
+        leaf.keys = leaf.keys[:mid]
+        leaf.values = leaf.values[:mid]
+        promote_key = new_leaf.keys[0]
+        self.promote_key(leaf, promote_key, new_leaf)
+    
