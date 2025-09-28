@@ -56,3 +56,13 @@ class BPlusTreeClusteredIndex:
         if pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
             return leaf_node.records[pos] 
         return None
+
+    def insert(self, record: 'Record') -> bool:
+        key = self.get_key_value(record)
+        
+        if self.search(key) is not None:
+            return False  
+            
+        self.insert_recursive(self.root, key, record)
+        self.save_tree()
+        return True
