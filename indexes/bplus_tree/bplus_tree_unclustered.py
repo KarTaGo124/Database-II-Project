@@ -14,7 +14,7 @@ class RecordPointer:
 class BPlusTreeUnclusteredIndex:
     def __init__(self, order:int, index_column: str, file_path: str):
         self.index_column = index_column
-        self.root = Node()  # Root node of the B+ tree
+        self.root = LeafNode()  # Root node of the B+ tree
         self.max_keys = order - 1  # Maximum keys for node
         self.order = order
         self.key_field = index_column
