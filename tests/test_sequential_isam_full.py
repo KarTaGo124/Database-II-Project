@@ -73,12 +73,10 @@ def test_sequential_isam_comprehensive():
     load_time = time.time() - start_time
     print(f"\n4. Total insertado: {inserted_count} registros en {load_time:.2f}s")
 
-    # Test stats del Sequential File
-    print("\n5. Stats del Sequential File...")
+    # Info del Sequential File
+    print("\n5. Info del Sequential File...")
     table_info = db_manager.tables["sales"]
     primary_index = table_info["primary_index"]
-    stats = primary_index.get_stats()
-    print(f"   I/O Stats: {stats}")
     print(f"   k (log n): {primary_index.k}")
     print(f"   Total records: {primary_index.total_records}")
     print(f"   Deleted count: {primary_index.deleted_count}")
@@ -90,8 +88,8 @@ def test_sequential_isam_comprehensive():
     start_time = time.time()
     for test_id in test_ids:
         result = db_manager.search("sales", test_id)
-        if result.data:
-            print(f"   ID {test_id}: {result.data.product_name.decode().strip()}")
+        if result.data and len(result.data) > 0:
+            print(f"   ID {test_id}: {result.data[0].product_name.decode().strip()}")
         else:
             print(f"   ID {test_id}: No encontrado")
     search_time = time.time() - start_time
@@ -140,17 +138,15 @@ def test_sequential_isam_comprehensive():
             print(f"   Eliminado ID {del_id}")
             # Verificar que ya no existe
             result = db_manager.search("sales", del_id)
-            if result.data is None:
+            if not result.data or len(result.data) == 0:
                 print(f"     Verificado: ID {del_id} ya no existe")
             else:
                 print(f"     ERROR: ID {del_id} aún existe después de eliminar")
         else:
             print(f"   ERROR: No se pudo eliminar ID {del_id}")
 
-    # Stats finales
-    print("\n11. Stats finales...")
-    final_stats = primary_index.get_stats()
-    print(f"   I/O Stats finales: {final_stats}")
+    # Info final
+    print("\n11. Info final...")
     print(f"   k final: {primary_index.k}")
     print(f"   Total records final: {primary_index.total_records}")
     print(f"   Deleted count final: {primary_index.deleted_count}")

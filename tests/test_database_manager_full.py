@@ -143,20 +143,13 @@ def main():
 
     for i, record in enumerate(records):
         try:
-            # Acceso directo al índice para obtener métricas
-            table_info = db.tables["sales"]
-            primary_index = table_info["primary_index"]
-            result = primary_index.insert(record)
+            # Usar interfaz unificada del DatabaseManager que ya maneja todos los índices
+            result = db.insert("sales", record)
 
             # Acumular métricas
             if hasattr(result, 'execution_time_ms'):
                 total_insert_time += result.execution_time_ms
                 total_disk_accesses += result.total_disk_accesses
-
-            # También insertar en índices secundarios
-            for field_name, index_info in table_info["secondary_indexes"].items():
-                secondary_index = index_info["index"]
-                secondary_index.insert(record)
 
             if (i + 1) % 100 == 0:
                 print(f"   Insertados: {i + 1}/{len(records)}")
@@ -199,12 +192,10 @@ def main():
 
     for pk in test_pks:
         try:
-            # Acceso directo para métricas
-            table_info = db.tables["sales"]
-            primary_index = table_info["primary_index"]
-            result = primary_index.search(pk)
+            # Usar interfaz unificada del DatabaseManager
+            result = db.search("sales", pk)
 
-            if result.data is not None:
+            if result.data and len(result.data) > 0:
                 successful_primary += 1
                 total_search_time += result.execution_time_ms
                 total_search_accesses += result.total_disk_accesses
@@ -270,7 +261,8 @@ def main():
     deleted_count = 0
     for pk in delete_pks:
         try:
-            if db.delete("sales", pk):
+            delete_result = db.delete("sales", pk)
+            if delete_result.data:
                 deleted_count += 1
         except Exception as e:
             print(f"   Error eliminando {pk}: {e}")
@@ -282,7 +274,8 @@ def main():
     not_found_count = 0
     for pk in delete_pks:
         try:
-            if db.search("sales", pk) is None:
+            search_result = db.search("sales", pk)
+            if not search_result.data or len(search_result.data) == 0:
                 not_found_count += 1
         except:
             not_found_count += 1
@@ -377,7 +370,8 @@ def main():
     found_remaining = 0
     for pk in test_remaining_pks:
         try:
-            if db.search("sales", pk) is not None:
+            search_result = db.search("sales", pk)
+            if search_result.data and len(search_result.data) > 0:
                 found_remaining += 1
         except:
             pass
