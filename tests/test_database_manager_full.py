@@ -138,17 +138,33 @@ def main():
     print(f"\n1. INSERCION MASIVA - {len(records)} registros")
     print("-" * 60)
 
-    start_time = time.time()
+    total_insert_time = 0
+    total_disk_accesses = 0
+
     for i, record in enumerate(records):
         try:
-            db.insert("sales", record)
+            # Acceso directo al índice para obtener métricas
+            table_info = db.tables["sales"]
+            primary_index = table_info["primary_index"]
+            result = primary_index.insert(record)
+
+            # Acumular métricas
+            if hasattr(result, 'execution_time_ms'):
+                total_insert_time += result.execution_time_ms
+                total_disk_accesses += result.total_disk_accesses
+
+            # También insertar en índices secundarios
+            for field_name, index_info in table_info["secondary_indexes"].items():
+                secondary_index = index_info["index"]
+                secondary_index.insert(record)
+
             if (i + 1) % 100 == 0:
                 print(f"   Insertados: {i + 1}/{len(records)}")
         except Exception as e:
             print(f"ERROR - Error insertando registro {i+1}: {e}")
             return False
 
-    insertion_time = time.time() - start_time
+    insertion_time = total_insert_time / 1000  # Convertir a segundos
 
     # Validar inserción
     primary_count, secondary_counts, errors = validate_database_consistency(db, "sales", len(records))
@@ -158,6 +174,9 @@ def main():
     print(f"   - Secondary nombre_producto: {secondary_counts.get('nombre_producto', 0)}")
     print(f"   - Secondary cantidad_vendida: {secondary_counts.get('cantidad_vendida', 0)}")
     print(f"   - Tiempo: {insertion_time:.2f} segundos")
+    print(f"   - Promedio por registro: {total_insert_time/len(records):.2f} ms")
+    print(f"   - Total accesos a disco: {total_disk_accesses}")
+    print(f"   - Promedio accesos por registro: {total_disk_accesses/len(records):.1f}")
     print(f"   - Errores de consistencia: {len(errors)}")
 
     if len(errors) == 0 and primary_count == len(records):
@@ -172,35 +191,47 @@ def main():
     print("\n2. PRUEBAS DE BUSQUEDA EXHAUSTIVAS")
     print("-" * 60)
 
-    # Búsquedas primarias
+    # Búsquedas primarias con métricas
     test_pks = random.sample([r.get_key() for r in records], 50)
-    search_start = time.time()
     successful_primary = 0
+    total_search_time = 0
+    total_search_accesses = 0
 
     for pk in test_pks:
         try:
-            result = db.search("sales", pk)
-            if result is not None:
+            # Acceso directo para métricas
+            table_info = db.tables["sales"]
+            primary_index = table_info["primary_index"]
+            result = primary_index.search(pk)
+
+            if result.data is not None:
                 successful_primary += 1
+                total_search_time += result.execution_time_ms
+                total_search_accesses += result.total_disk_accesses
+
         except Exception as e:
             print(f"   Error en búsqueda primaria {pk}: {e}")
 
-    primary_search_time = time.time() - search_start
-    print(f"   Búsquedas primarias: {successful_primary}/50 exitosas ({primary_search_time*1000:.2f}ms)")
+    avg_search_time = total_search_time / successful_primary if successful_primary > 0 else 0
+    avg_search_accesses = total_search_accesses / successful_primary if successful_primary > 0 else 0
+
+    print(f"   Búsquedas primarias: {successful_primary}/50 exitosas")
+    print(f"   - Tiempo promedio: {avg_search_time:.2f} ms")
+    print(f"   - Accesos promedio: {avg_search_accesses:.1f}")
 
     # Búsquedas secundarias por nombre
     search_start = time.time()
     try:
-        laptop_results = db.search_by_secondary('sales', 'nombre_producto', 'Laptop')
-        smartphone_results = db.search_by_secondary('sales', 'nombre_producto', 'Smartphone')
-        tablet_results = db.search_by_secondary('sales', 'nombre_producto', 'Tablet')
-        camara_results = db.search_by_secondary('sales', 'nombre_producto', 'Camara')
+        laptop_results = db.search('sales', 'Laptop', 'nombre_producto')
+        smartphone_results = db.search('sales', 'Smartphone', 'nombre_producto')
+        tablet_results = db.search('sales', 'Tablet', 'nombre_producto')
+        camara_results = db.search('sales', 'Camara', 'nombre_producto')
         secondary_search_time = time.time() - search_start
 
-        print(f"   Búsqueda 'Laptop': {len(laptop_results)} resultados")
-        print(f"   Búsqueda 'Smartphone': {len(smartphone_results)} resultados")
-        print(f"   Búsqueda 'Tablet': {len(tablet_results)} resultados")
-        print(f"   Búsqueda 'Camara': {len(camara_results)} resultados")
+        print(f"   Búsqueda 'Laptop': {len(laptop_results.data) if laptop_results.data else 0} resultados")
+        print(f"   Búsqueda 'Smartphone': {len(smartphone_results.data) if smartphone_results.data else 0} resultados")
+        print(f"   Búsqueda 'Tablet': {len(tablet_results.data) if tablet_results.data else 0} resultados")
+        print(f"   Búsqueda 'Camara': {len(camara_results.data) if camara_results.data else 0} resultados")
         print(f"   Tiempo búsquedas secundarias nombre: {secondary_search_time*1000:.2f}ms")
     except Exception as e:
         print(f"   ERROR en búsquedas secundarias: {e}")
@@ -209,14 +240,14 @@ def main():
     # Búsquedas por rangos
     try:
         range_start = time.time()
-        range_cantidad_1 = db.range_search('sales', 1, 10, field_name='cantidad_vendida')
-        range_cantidad_2 = db.range_search('sales', 15, 25, field_name='cantidad_vendida')
-        range_cantidad_3 = db.range_search('sales', 5, 15, field_name='cantidad_vendida')
+        range_cantidad_1 = db.range_search('sales', 1, 10, 'cantidad_vendida')
+        range_cantidad_2 = db.range_search('sales', 15, 25, 'cantidad_vendida')
+        range_cantidad_3 = db.range_search('sales', 5, 15, 'cantidad_vendida')
         range_time = time.time() - range_start
 
-        print(f"   Rango cantidad 1-10: {len(range_cantidad_1)} resultados")
-        print(f"   Rango cantidad 15-25: {len(range_cantidad_2)} resultados")
-        print(f"   Rango cantidad 5-15: {len(range_cantidad_3)} resultados")
+        print(f"   Rango cantidad 1-10: {len(range_cantidad_1.data) if range_cantidad_1.data else 0} resultados")
+        print(f"   Rango cantidad 15-25: {len(range_cantidad_2.data) if range_cantidad_2.data else 0} resultados")
+        print(f"   Rango cantidad 5-15: {len(range_cantidad_3.data) if range_cantidad_3.data else 0} resultados")
         print(f"   Tiempo búsquedas por rango: {range_time*1000:.2f}ms")
     except Exception as e:
         print(f"   ERROR en búsquedas por rango: {e}")
@@ -309,11 +340,11 @@ def main():
 
     # Verificar nuevas inserciones
     try:
-        test_new_search = db.search_by_secondary('sales', 'nombre_producto', 'ProductoNuevo_1')
-        test_range_new = db.range_search('sales', 1, 30, field_name='cantidad_vendida')
+        test_new_search = db.search('sales', 'ProductoNuevo_1', 'nombre_producto')
+        test_range_new = db.range_search('sales', 1, 30, 'cantidad_vendida')
 
-        print(f"   Búsqueda producto nuevo: {len(test_new_search)} resultados")
-        print(f"   Rango cantidad 1-30 (incluye nuevos): {len(test_range_new)} resultados")
+        print(f"   Búsqueda producto nuevo: {len(test_new_search.data) if test_new_search.data else 0} resultados")
+        print(f"   Rango cantidad 1-30 (incluye nuevos): {len(test_range_new.data) if test_range_new.data else 0} resultados")
     except Exception as e:
         print(f"   ERROR verificando nuevas inserciones: {e}")
 
@@ -357,8 +388,8 @@ def main():
     found_new = 0
     for i in range(1, min(11, inserted_new + 1)):
         try:
-            result = db.search_by_secondary('sales', 'nombre_producto', f'ProductoNuevo_{i}')
-            if len(result) > 0:
+            result = db.search('sales', f'ProductoNuevo_{i}', 'nombre_producto')
+            if result.data and len(result.data) > 0:
                 found_new += 1
         except:
             pass
@@ -367,8 +398,8 @@ def main():
 
     # Búsquedas por rango final
     try:
-        final_range_cantidad = db.range_search('sales', 5, 25, field_name='cantidad_vendida')
-        print(f"   Rango cantidad 5-25 (final): {len(final_range_cantidad)} resultados")
+        final_range_cantidad = db.range_search('sales', 5, 25, 'cantidad_vendida')
+        print(f"   Rango cantidad 5-25 (final): {len(final_range_cantidad.data) if final_range_cantidad.data else 0} resultados")
     except Exception as e:
         print(f"   ERROR en búsqueda final por rango: {e}")
 
