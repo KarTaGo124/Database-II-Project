@@ -244,7 +244,22 @@ class DatabaseManager:
             return ISAMPrimaryIndex(table, primary_filename)
 
         elif index_type == "SEQUENTIAL":
-            raise NotImplementedError(f"Sequential file index not implemented yet")
+            from ..sequential_file.sequential_file import SequentialFile
+
+            primary_dir = os.path.join(self.base_dir, "primary")
+            os.makedirs(primary_dir, exist_ok=True)
+            main_filename = os.path.join(primary_dir, "main.dat")
+            aux_filename = os.path.join(primary_dir, "aux.dat")
+
+            extra_fields = {"active": ("BOOL", 1)}
+            table_with_active = Table(
+                table_name=table.table_name,
+                sql_fields=table.sql_fields,
+                key_field=table.key_field,
+                extra_fields=extra_fields
+            )
+
+            return SequentialFile(main_filename, aux_filename, table_with_active)
         elif index_type == "BTREE":
             raise NotImplementedError(f"B+Tree index not implemented yet")
 
