@@ -302,3 +302,87 @@ class BPlusTreeClusteredIndex:
 
     def get_key_value(self, record: 'Record') -> Any:
         return record.get_field_value(self.key_column)
+    
+    def range_search(self, start_key: Any, end_key: Any) -> List['Record']:
+        results = []
+        leaf = self.find_leaf_node(start_key)
+        
+        # starting position
+        pos = bisect.bisect_left(leaf.keys, start_key)
+        
+        while leaf is not None:
+            for i in range(pos, len(leaf.keys)):
+                if leaf.keys[i] > end_key:
+                    return results
+                if leaf.keys[i] >= start_key:
+                    results.append(leaf.records[i])  
+            
+            leaf = leaf.next
+            pos = 0
+        
+        return results
+    
+    def save_tree(self):
+        try:
+            with open(self.file_path, 'wb') as f:
+                tree_data = {
+                    'root_page_id': self.root_page_id,
+                    'pages': self.pages,
+                    'next_page_id': self.next_page_id,
+                    'order': self.order,
+                    'key_column': self.key_column,
+                    'first_leaf_id': self.first_leaf.id if self.first_leaf else None
+                }
+                pickle.dump(tree_data, f)
+        except Exception as e:
+            print(f"Error saving clustered tree {e}")
+
+    def load_tree(self):
+        try:
+            if os.path.exists(self.file_path):
+                with open(self.file_path, 'rb') as f:
+                    tree_data = pickle.load(f)
+                    self.root_page_id = tree_data['root_page_id']
+                    self.pages = tree_data['pages']
+                    self.next_page_id = tree_data['next_page_id']
+                    self.root = self.pages[self.root_page_id]
+                    
+                    first_leaf_id = tree_data.get('first_leaf_id')
+                    if first_leaf_id is not None and first_leaf_id in self.pages:
+                        self.first_leaf = self.pages[first_leaf_id]
+                    else:
+                        current = self.root
+                        while isinstance(current, ClusteredInternalNode):
+                            if current.children:
+                                current = current.children[0]
+                            else:
+                                break
+                        self.first_leaf = current if isinstance(current, ClusteredLeafNode) else self.root
+        except Exception as e:
+            print(f"Error loading clustered tree {e}")
+
+    def load_tree(self):
+        try:
+            if os.path.exists(self.file_path):
+                with open(self.file_path, 'rb') as f:
+                    tree_data = pickle.load(f)
+                    self.root_page_id = tree_data['root_page_id']
+                    self.pages = tree_data['pages']
+                    self.next_page_id = tree_data['next_page_id']
+                    self.root = self.pages[self.root_page_id]
+                    
+                    # first_leaf pointer
+                    first_leaf_id = tree_data.get('first_leaf_id')
+                    if first_leaf_id is not None and first_leaf_id in self.pages:
+                        self.first_leaf = self.pages[first_leaf_id]
+                    else:
+                        # first leaf manually
+                        current = self.root
+                        while isinstance(current, ClusteredInternalNode):
+                            if current.children:
+                                current = current.children[0]
+                            else:
+                                break
+                        self.first_leaf = current if isinstance(current, ClusteredLeafNode) else self.root
+        except Exception as e:
+            print(f"Error loading clustered tree {e}")
