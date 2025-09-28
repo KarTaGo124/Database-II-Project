@@ -1,10 +1,11 @@
 import os, struct
 from typing import List, Any, Optional
 from ..core.record import Record, Table
+from ..core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 10
-ROOT_INDEX_BLOCK_FACTOR = 8
-LEAF_INDEX_BLOCK_FACTOR = 12
+ROOT_INDEX_BLOCK_FACTOR = 15
+LEAF_INDEX_BLOCK_FACTOR = 20
 CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
 
@@ -337,6 +338,7 @@ class ISAMPrimaryIndex:
         self.next_page_number = 0
         self.next_root_index_page_number = 0
         self.next_leaf_index_page_number = 0
+        self.performance = PerformanceTracker()
 
     def _create_initial_files(self, record: Record):
         with open(self.filename, "wb") as file:
@@ -376,32 +378,38 @@ class ISAMPrimaryIndex:
         page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
+        self.performance.track_read()
         return Page.unpack(file.read(page_size), self.block_factor, self.record_template.RECORD_SIZE, self.table)
 
     def _write_page(self, file, page_num, page):
         page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         offset = self.DATA_START_OFFSET + (page_num * page_size)
         file.seek(offset)
+        self.performance.track_write()
         file.write(page.pack())
 
     def _read_root_index(self, file, page_num):
         root_size = RootIndex.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE
         file.seek(page_num * root_size)
+        self.performance.track_read()
         return RootIndex.unpack(file.read(root_size), self.root_index_block_factor)
 
     def _write_root_index(self, file, page_num, root_index):
         root_size = RootIndex.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE
         file.seek(page_num * root_size)
+        self.performance.track_write()
         file.write(root_index.pack())
 
     def _read_leaf_index(self, file, page_num):
         leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
         file.seek(page_num * leaf_size)
+        self.performance.track_read()
         return LeafIndex.unpack(file.read(leaf_size), self.leaf_index_block_factor)
 
     def _write_leaf_index(self, file, page_num, leaf_index):
         leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
         file.seek(page_num * leaf_size)
+        self.performance.track_write()
         file.write(leaf_index.pack())
 
     # Operaciones intermedias
@@ -808,12 +816,14 @@ class ISAMPrimaryIndex:
     # Operaciones principales
     
     def insert(self, record: Record):
-        if self.search(record.get_key()) is not None:
+        self.performance.start_operation()
+
+        if self.search_without_metrics(record.get_key()) is not None:
             raise ValueError(f"Primary key {record.get_key()} already exists")
 
         if not os.path.exists(self.filename):
             self._create_initial_files(record)
-            return
+            return self.performance.end_operation(True)
 
         target_leaf_page_num = self._find_target_leaf_page(record.get_key())
         target_data_page_num = self._find_target_data_page(record.get_key(), target_leaf_page_num)
@@ -827,7 +837,22 @@ class ISAMPrimaryIndex:
             else:
                 self._handle_page_overflow(file, target_data_page_num, page, record, target_leaf_page_num)
 
+        return self.performance.end_operation(True)
+
     def search(self, key_value):
+        self.performance.start_operation()
+
+        if not os.path.exists(self.filename):
+            return self.performance.end_operation(None)
+
+        target_leaf_page_num = self._find_target_leaf_page(key_value)
+        target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
+
+        with open(self.filename, "rb") as file:
+            result = self._search_in_page_chain(file, target_data_page_num, key_value)
+            return self.performance.end_operation(result)
+
+    def search_without_metrics(self, key_value):
         if not os.path.exists(self.filename):
             return None
 
@@ -838,8 +863,10 @@ class ISAMPrimaryIndex:
             return self._search_in_page_chain(file, target_data_page_num, key_value)
 
     def delete(self, key_value):
+        self.performance.start_operation()
+
         if not os.path.exists(self.filename):
-            return False
+            return self.performance.end_operation(False)
 
         target_leaf_page_num = self._find_target_leaf_page(key_value)
         target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
@@ -854,18 +881,20 @@ class ISAMPrimaryIndex:
                     self._try_consolidate_page(file, target_data_page_num)
 
                     if self._should_rebuild():
-                        print("Auto-rebuilding due to fragmentation...")
                         self.rebuild()
 
-                return True
+                return self.performance.end_operation(True)
 
-            return self._delete_from_overflow_chain(file, target_data_page_num, key_value)
+            result = self._delete_from_overflow_chain(file, target_data_page_num, key_value)
+            return self.performance.end_operation(result)
 
     def range_search(self, begin_key, end_key):
+        self.performance.start_operation()
+
         results = []
 
         if not os.path.exists(self.filename) or begin_key > end_key:
-            return results
+            return self.performance.end_operation(results)
 
         start_leaf, end_leaf = self._find_leaf_page_range_for_keys(begin_key, end_key)
 
@@ -894,7 +923,8 @@ class ISAMPrimaryIndex:
 
                             current_page_num = page.next_page if page.next_page != -1 else None
 
-        return sorted(results, key=lambda r: r.get_key())
+        sorted_results = sorted(results, key=lambda r: r.get_key())
+        return self.performance.end_operation(sorted_results)
 
     def rebuild(self):
         all_records = self._extract_all_records()
