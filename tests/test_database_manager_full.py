@@ -5,7 +5,7 @@ import shutil
 import time
 import random
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from indexes.core.database_manager import DatabaseManager
 from indexes.core.record import Record, Table
