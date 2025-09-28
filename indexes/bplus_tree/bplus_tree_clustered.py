@@ -112,3 +112,35 @@ class BPlusTreeClusteredIndex:
         
         self.save_tree()
         return True
+
+    def handle_leaf_underflow(self, leaf: ClusteredLeafNode):
+        parent = leaf.parent
+        if not parent:
+            return
+        
+        # leaf position in parent
+        leaf_index = parent.children.index(leaf)
+        
+        # borrow from left sibling
+        if leaf_index > 0:
+            left_sibling = parent.children[leaf_index - 1]
+            if isinstance(left_sibling, ClusteredLeafNode) and len(left_sibling.keys) > self.min_keys:
+                self.borrow_from_left_leaf(leaf, left_sibling, parent, leaf_index)
+                return
+        
+        # borrow from right sibling
+        if leaf_index < len(parent.children) - 1:
+            right_sibling = parent.children[leaf_index + 1]
+            if isinstance(right_sibling, ClusteredLeafNode) and len(right_sibling.keys) > self.min_keys:
+                self.borrow_from_right_leaf(leaf, right_sibling, parent, leaf_index)
+                return
+        
+        # merge
+        if leaf_index > 0:
+            left_sibling = parent.children[leaf_index - 1]
+            if isinstance(left_sibling, ClusteredLeafNode):
+                self.merge_leaf_with_left(leaf, left_sibling, parent, leaf_index)
+        else:
+            right_sibling = parent.children[leaf_index + 1]
+            if isinstance(right_sibling, ClusteredLeafNode):
+                self.merge_leaf_with_right(leaf, right_sibling, parent, leaf_index)
