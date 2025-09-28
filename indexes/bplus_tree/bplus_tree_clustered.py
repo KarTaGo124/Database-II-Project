@@ -207,3 +207,33 @@ class BPlusTreeClusteredIndex:
         
         if parent != self.root and parent.is_underflow(self.min_keys):
             self.handle_internal_underflow(parent)
+    
+    def split_leaf(self, leaf: ClusteredLeafNode):
+        mid = len(leaf.keys) // 2
+        new_leaf = ClusteredLeafNode()
+        
+        # move half the keys and records to new leaf
+        new_leaf.keys = leaf.keys[mid:]
+        new_leaf.records = leaf.records[mid:]
+        new_leaf.parent = leaf.parent
+        
+        # update pointers
+        new_leaf.next = leaf.next
+        new_leaf.previous = leaf
+        
+        if leaf.next:
+            leaf.next.previous = new_leaf
+        leaf.next = new_leaf
+        
+        # keep first half in original leaf
+        leaf.keys = leaf.keys[:mid]
+        leaf.records = leaf.records[:mid]
+        
+        # assign page ID to new node and add to pages
+        new_leaf.id = self.next_page_id
+        self.pages[self.next_page_id] = new_leaf
+        self.next_page_id += 1
+        
+        # promote the first key of new leaf to parent
+        promote_key = new_leaf.keys[0]
+        self.promote_key(leaf, promote_key, new_leaf)
