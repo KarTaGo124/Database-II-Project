@@ -1,1 +1,0 @@
-# Medir accesos y tiempo
