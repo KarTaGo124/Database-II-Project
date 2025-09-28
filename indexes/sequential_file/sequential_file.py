@@ -1,1 +1,281 @@
-# Sequential File Index
+import os
+import math
+from typing import List
+from ..core.record import Record, Table
+
+class SequentialFile:
+    def __init__(self, main_file: str, aux_file: str, table: Table, k_rec=None):
+        self.main_file = main_file
+        self.aux_file = aux_file
+        self.table = table
+        self.list_of_types = table.all_fields
+        self.key_field = table.key_field
+        self.k = k_rec if k_rec is not None else 10
+        self.read_count = 0
+        self.write_count = 0
+        self.deleted_count = 0
+        self.total_records = 0
+
+        if not any(field[0] == 'active' for field in self.list_of_types):
+            raise ValueError("La tabla debe tener un campo 'active' de tipo BOOL en extra_fields")
+
+        if not os.path.exists(self.main_file):
+            open(self.main_file, 'wb').close()
+        if not os.path.exists(self.aux_file):
+            open(self.aux_file, 'wb').close()
+
+    def _create_record(self):
+        return Record(self.list_of_types, self.key_field)
+
+    def reset_counters(self):
+        self.read_count = 0
+        self.write_count = 0
+
+    def update_k_dynamically(self):
+        if self.total_records > 0:
+            new_k = max(1, int(math.log2(self.total_records)))
+            self.k = new_k
+            return new_k
+        return self.k
+
+    def get_stats(self):
+        return {
+            "Lecturas": self.read_count,
+            "Escrituras": self.write_count,
+            "Total": self.read_count + self.write_count
+        }
+    
+    def get_file_size(self, filename: str) -> int:
+        if not os.path.exists(filename):
+            return 0
+        file_size = os.path.getsize(filename)
+        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
+        return file_size // record_size
+
+    def show_all_records_from_main_and_aux(self) -> List[Record]:
+        records = []
+        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
+        
+        with open(self.main_file, 'rb') as f:
+            while data := f.read(record_size):
+                self.read_count += 1
+                rec = Record.unpack(data, self.list_of_types, self.key_field)
+                if rec.active:
+                    records.append(rec)
+        
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(record_size):
+                    self.read_count += 1
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    if rec.active:
+                        records.append(rec)
+        
+        return records
+    
+    def rebuild(self):
+        records = []
+        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
+
+        with open(self.main_file, 'rb') as f:
+            while data := f.read(record_size):
+                self.read_count += 1
+                rec = Record.unpack(data, self.list_of_types, self.key_field)
+                if rec.active:
+                    records.append(rec)
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(record_size):
+                    self.read_count += 1
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    if rec.active:
+                        records.append(rec)
+            os.remove(self.aux_file)
+
+        records.sort(key=lambda r: r.get_key())
+
+        with open(self.main_file, 'wb') as f:
+            for record in records:
+                f.write(record.pack())
+                self.write_count += 1
+
+        open(self.aux_file, 'wb').close()
+
+        self.deleted_count = 0
+        self.total_records = len(records)
+        self.update_k_dynamically()
+
+    def insert(self, record: Record):
+        existing = self.search(record.get_key())
+        if existing is not None:
+            raise ValueError(f"Record con clave {record.get_key()} ya existe")
+
+        record.active = True
+        with open(self.aux_file, 'ab') as f:
+            f.write(record.pack())
+            self.write_count += 1
+
+        self.total_records += 1
+
+        aux_size = self.get_file_size(self.aux_file)
+        if aux_size > self.k:
+            self.rebuild()
+
+        return True
+
+    def delete(self, key):
+        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
+
+        with open(self.main_file, 'r+b') as f:
+            i = 0
+            while data := f.read(record_size):
+                self.read_count += 1
+                rec = Record.unpack(data, self.list_of_types, self.key_field)
+                if rec.get_key() == key:
+                    if rec.active:
+                        rec.active = False
+                        f.seek(i * record_size)
+                        f.write(rec.pack())
+                        self.write_count += 1
+                        self.deleted_count += 1
+
+                        if self.total_records > 0 and self.deleted_count > (self.total_records * 0.1):
+                            self.rebuild()
+
+                        return True
+                    else:
+                        return False
+                i += 1
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'r+b') as f:
+                i = 0
+                while data := f.read(record_size):
+                    self.read_count += 1
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    if rec.get_key() == key:
+                        if rec.active:
+                            rec.active = False
+                            f.seek(i * record_size)
+                            f.write(rec.pack())
+                            self.write_count += 1
+                            self.deleted_count += 1
+
+                            if self.total_records > 0 and self.deleted_count > (self.total_records * 0.1):
+                                self.rebuild()
+
+                            return True
+                        else:
+                            return False
+                    i += 1
+
+        return False
+
+    def search(self, key):
+        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
+
+        main_size = self.get_file_size(self.main_file)
+        if main_size > 0:
+            with open(self.main_file, 'rb') as f:
+                left, right = 0, main_size - 1
+
+                while left <= right:
+                    mid = (left + right) // 2
+                    f.seek(mid * record_size)
+                    data = f.read(record_size)
+                    self.read_count += 1
+
+                    if not data:
+                        break
+
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    rec_key = rec.get_key()
+
+                    if rec_key == key:
+                        if rec.active:
+                            return rec
+                        else:
+                            return None
+                    elif rec_key < key:
+                        left = mid + 1
+                    else:
+                        right = mid - 1
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while True:
+                    data = f.read(record_size)
+                    if not data:
+                        break
+
+                    self.read_count += 1
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+
+                    if rec.get_key() == key:
+                        if rec.active:
+                            return rec
+                        else:
+                            return None
+
+        return None
+
+    def range_search(self, begin_key, end_key):
+        results = []
+        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
+        main_size = self.get_file_size(self.main_file)
+
+        if main_size > 0:
+            start_pos = 0
+            with open(self.main_file, 'rb') as f:
+                left, right = 0, main_size - 1
+                while left <= right:
+                    mid = (left + right) // 2
+                    f.seek(mid * record_size)
+                    data = f.read(record_size)
+                    if data:
+                        self.read_count += 1
+                        rec = Record.unpack(data, self.list_of_types, self.key_field)
+                        if rec.get_key() >= begin_key:
+                            start_pos = mid
+                            right = mid - 1
+                        else:
+                            left = mid + 1
+
+            with open(self.main_file, 'rb') as f:
+                f.seek(start_pos * record_size)
+                for i in range(start_pos, main_size):
+                    data = f.read(record_size)
+                    if not data:
+                        break
+                    self.read_count += 1
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    if rec.active and begin_key <= rec.get_key() <= end_key:
+                        results.append(rec)
+                    elif rec.get_key() > end_key:
+                        break
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(record_size):
+                    self.read_count += 1
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    if rec.active and begin_key <= rec.get_key() <= end_key:
+                        results.append(rec)
+
+        results.sort(key=lambda r: r.get_key())
+        return results
+
+    def scanAll(self):
+        return self.show_all_records_from_main_and_aux()
+
+    def drop_table(self):
+        removed_files = []
+        if os.path.exists(self.main_file):
+            os.remove(self.main_file)
+            removed_files.append(self.main_file)
+        if os.path.exists(self.aux_file):
+            os.remove(self.aux_file)
+            removed_files.append(self.aux_file)
+        return removed_files
+
