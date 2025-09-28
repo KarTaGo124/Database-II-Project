@@ -1,10 +1,11 @@
 import os
 import struct
 from ..core.record import Record, IndexRecord
+from ..core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 10
-ROOT_INDEX_BLOCK_FACTOR = 8
-LEAF_INDEX_BLOCK_FACTOR = 12
+ROOT_INDEX_BLOCK_FACTOR = 15
+LEAF_INDEX_BLOCK_FACTOR = 20
 CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
 
@@ -184,10 +185,13 @@ class ISAMSecondaryBase:
         self.leaf_index_block_factor = LEAF_INDEX_BLOCK_FACTOR
 
         self.free_list_stack = SecondaryFreeListStack(self.free_list_filename)
+        self.performance = PerformanceTracker()
 
     # Operaciones principales
 
     def insert(self, record: Record):
+        self.performance.start_operation()
+
         try:
             secondary_value = getattr(record, self.field_name)
             primary_key = record.get_key()
@@ -196,12 +200,11 @@ class ISAMSecondaryBase:
 
             if not os.path.exists(self.filename):
                 self._create_initial_files(index_record)
-                return
+                return self.performance.end_operation(True)
 
             search_key = self._get_search_key(secondary_value)
             target_leaf_page_num = self._find_target_leaf_page(search_key)
             target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
-
 
             with open(self.filename, "r+b") as file:
                 page = self._read_page(file, target_data_page_num)
@@ -211,14 +214,18 @@ class ISAMSecondaryBase:
                     self._write_page(file, target_data_page_num, page)
                 else:
                     self._handle_page_overflow(file, target_data_page_num, page, index_record, target_leaf_page_num)
+
+            return self.performance.end_operation(True)
         except Exception as e:
-            raise
+            return self.performance.end_operation(False)
 
     def search(self, secondary_value):
+        self.performance.start_operation()
+
         results = []
 
         if not os.path.exists(self.filename):
-            return results
+            return self.performance.end_operation(results)
 
         search_key = self._get_search_key(secondary_value)
         target_leaf_page_num = self._find_target_leaf_page(search_key)
@@ -234,7 +241,7 @@ class ISAMSecondaryBase:
                     for index_record in page.records:
                         if hasattr(index_record, 'index_value'):
                             if self._values_equal(index_record.index_value, secondary_value):
-                                primary_record = self.primary_isam.search(index_record.primary_key)
+                                primary_record = self.primary_isam.search_without_metrics(index_record.primary_key)
                                 if primary_record:
                                     results.append(primary_record)
                             elif self._value_greater(index_record.index_value, secondary_value):
@@ -244,13 +251,14 @@ class ISAMSecondaryBase:
                 except:
                     break
 
-        return results
+        return self.performance.end_operation(results)
 
     def range_search(self, start_value, end_value):
+        self.performance.start_operation()
         results = []
 
         if not os.path.exists(self.filename):
-            return results
+            return self.performance.end_operation(results)
 
         search_key = self._get_search_key(start_value)
         target_leaf_page_num = self._find_target_leaf_page(search_key)
@@ -265,7 +273,7 @@ class ISAMSecondaryBase:
                 for index_record in page.records:
                     if hasattr(index_record, 'index_value'):
                         if self._value_greater(index_record.index_value, end_value):
-                            return results
+                            return self.performance.end_operation(results)
 
                         if self._value_in_range(index_record.index_value, start_value, end_value):
                             primary_record = self.primary_isam.search(index_record.primary_key)
@@ -274,13 +282,15 @@ class ISAMSecondaryBase:
 
                 current_page_num = page.next_page if page.next_page != -1 else None
 
-        return results
+        return self.performance.end_operation(results)
 
     def delete(self, record: Record):
+        self.performance.start_operation()
         secondary_value = getattr(record, self.field_name)
         primary_key = record.get_key()
 
-        return self._delete_record(secondary_value, primary_key)
+        result = self._delete_record(secondary_value, primary_key)
+        return self.performance.end_operation(result)
 
     # Operaciones intermedias
 
@@ -318,12 +328,14 @@ class ISAMSecondaryBase:
     def _read_page(self, file, page_num):
         page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
         file.seek(self.DATA_START_OFFSET + page_num * page_size)
+        self.performance.track_read()
         page_data = file.read(page_size)
         return SecondaryPage.unpack(page_data, self.block_factor, self.index_record_template.RECORD_SIZE, self.field_type, self.field_size)
 
     def _write_page(self, file, page_num, page):
         page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
         file.seek(self.DATA_START_OFFSET + page_num * page_size)
+        self.performance.track_write()
         file.write(page.pack())
 
     def _handle_page_overflow(self, file, target_data_page_num, page, new_record, target_leaf_page_num):
