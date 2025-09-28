@@ -168,16 +168,5 @@ class IndexRecord(Record):
         return record
 
 
-class IndexTable:
-    @staticmethod
-    def create_index_table(field_name: str, field_type: str, field_size: int):
-        return Table(
-            table_name=f"{field_name}_index",
-            sql_fields=[
-                ("index_value", field_type, field_size),
-                ("primary_key", "INT", 4)
-            ],
-            key_field="index_value"
-        )
 
 
