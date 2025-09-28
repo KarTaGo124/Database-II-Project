@@ -28,3 +28,8 @@ class BPlusTreeUnclusteredIndex:
             record_position = leaf_node.values[pos]
             return self.load_from_record_pointer(record_position)
         return None
+    def insert(self, record: Record, record_pointer: RecordPointer):
+        key = self.get_key_value(record)
+        self.insert_recursive(self.root, key, record_pointer)
+        self.save_tree()
+    
