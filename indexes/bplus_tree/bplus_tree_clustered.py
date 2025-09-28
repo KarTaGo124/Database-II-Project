@@ -85,3 +85,30 @@ class BPlusTreeClusteredIndex:
                     self.split_leaf(child)
                 else:
                     self.split_internal(child)
+    def delete(self, key: Any) -> bool:
+        leaf = self.find_leaf_node(key)
+        pos = bisect.bisect_left(leaf.keys, key)
+        
+        if pos >= len(leaf.keys) or leaf.keys[pos] != key:
+            return False  # Key not found
+        
+        # remove key and record from leaf
+        leaf.keys.pop(pos)
+        leaf.records.pop(pos)
+        
+        if leaf != self.root and leaf.is_underflow(self.min_keys):
+            self._handle_leaf_underflow(leaf)
+        
+        # root is empty
+        if isinstance(self.root, ClusteredInternalNode) and len(self.root.keys) == 0:
+            if len(self.root.children) > 0:
+                old_root_id = self.root.id
+                self.root = self.root.children[0]
+                self.root.parent = None
+                self.root_page_id = self.root.id
+                
+                if old_root_id in self.pages:
+                    del self.pages[old_root_id]
+        
+        self.save_tree()
+        return True
