@@ -1,6 +1,6 @@
 import os
 import struct
-from ..core.record import IndexRecord, IndexTable
+from ..core.record import Record, IndexRecord
 
 BLOCK_FACTOR = 10
 ROOT_INDEX_BLOCK_FACTOR = 8
@@ -26,7 +26,7 @@ class SecondaryPage:
         return header_data + record_data
 
     @staticmethod
-    def unpack(data: bytes, block_factor=BLOCK_FACTOR, record_size=None, table=None):
+    def unpack(data: bytes, block_factor=BLOCK_FACTOR, record_size=None, field_type=None, field_size=None):
         if len(data) < SecondaryPage.HEADER_SIZE:
             return SecondaryPage([], -1, block_factor, record_size)
 
@@ -44,14 +44,19 @@ class SecondaryPage:
             if len(record_data) < record_size:
                 break
             try:
-                record = IndexRecord.unpack(record_data, table.all_fields, table.key_field)
+                # Create list_of_types for IndexRecord
+                list_of_types = [
+                    ("index_value", field_type, field_size),
+                    ("primary_key", "INT", 4)
+                ]
+                record = IndexRecord.unpack(record_data, list_of_types, "index_value")
                 records.append(record)
             except:
                 break
             offset += record_size
         return SecondaryPage(records, next_page, block_factor, record_size)
 
-    def insert_sorted(self, record):
+    def insert_sorted(self, record: IndexRecord):
         left, right = 0, len(self.records)
         while left < right:
             mid = (left + right) // 2
@@ -182,7 +187,7 @@ class ISAMSecondaryBase:
 
     # Operaciones principales
 
-    def insert(self, record):
+    def insert(self, record: Record):
         try:
             secondary_value = getattr(record, self.field_name)
             primary_key = record.get_key()
@@ -271,7 +276,7 @@ class ISAMSecondaryBase:
 
         return results
 
-    def delete(self, record):
+    def delete(self, record: Record):
         secondary_value = getattr(record, self.field_name)
         primary_key = record.get_key()
 
@@ -311,13 +316,13 @@ class ISAMSecondaryBase:
     # Escritura y lectura de páginas e índices
 
     def _read_page(self, file, page_num):
-        page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size
+        page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
         file.seek(self.DATA_START_OFFSET + page_num * page_size)
         page_data = file.read(page_size)
-        return SecondaryPage.unpack(page_data, self.block_factor, self.index_table.record_size, self.index_table)
+        return SecondaryPage.unpack(page_data, self.block_factor, self.index_record_template.RECORD_SIZE, self.field_type, self.field_size)
 
     def _write_page(self, file, page_num, page):
-        page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size
+        page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
         file.seek(self.DATA_START_OFFSET + page_num * page_size)
         file.write(page.pack())
 
@@ -330,11 +335,11 @@ class ISAMSecondaryBase:
             else:
                 file.seek(0, 2)
                 file_size = file.tell()
-                page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size
+                page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
                 overflow_page_num = (file_size - self.DATA_START_OFFSET) // page_size
 
             # Create and write overflow page
-            overflow_page = SecondaryPage([], -1, self.block_factor, self.index_table.record_size)
+            overflow_page = SecondaryPage([], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
             overflow_page.insert_sorted(new_record)
             self._write_page(file, overflow_page_num, overflow_page)
 
@@ -365,11 +370,11 @@ class ISAMSecondaryBase:
                 else:
                     file.seek(0, 2)
                     file_size = file.tell()
-                    page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size
+                    page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
                     new_overflow_page_num = (file_size - self.DATA_START_OFFSET) // page_size
 
                 # Create new overflow page
-                new_overflow_page = SecondaryPage([], -1, self.block_factor, self.index_table.record_size)
+                new_overflow_page = SecondaryPage([], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
                 new_overflow_page.insert_sorted(new_record)
                 self._write_page(file, new_overflow_page_num, new_overflow_page)
 
@@ -391,7 +396,7 @@ class ISAMSecondaryBase:
                 if file_size < self.DATA_START_OFFSET:
                     return results
 
-                page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size
+                page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
                 num_pages = (file_size - self.DATA_START_OFFSET) // page_size
 
                 # Only read page 0 (main data page) and follow its overflow chain
@@ -404,7 +409,7 @@ class ISAMSecondaryBase:
 
                 if len(page_data) >= SecondaryPage.HEADER_SIZE:
                     try:
-                        page = SecondaryPage.unpack(page_data, self.block_factor, self.index_table.record_size, self.index_table)
+                        page = SecondaryPage.unpack(page_data, self.block_factor, self.index_record_template.RECORD_SIZE, self.field_type, self.field_size)
                         results.extend(page.records)
 
                         # Follow the overflow chain
@@ -415,7 +420,7 @@ class ISAMSecondaryBase:
                             if len(page_data) < SecondaryPage.HEADER_SIZE:
                                 break
                             try:
-                                overflow_page = SecondaryPage.unpack(page_data, self.block_factor, self.index_table.record_size, self.index_table)
+                                overflow_page = SecondaryPage.unpack(page_data, self.block_factor, self.index_record_template.RECORD_SIZE, self.field_type, self.field_size)
                                 results.extend(overflow_page.records)
                                 next_page_num = overflow_page.next_page
                             except:
@@ -515,9 +520,9 @@ class ISAMSecondaryBase:
         try:
             with open(self.filename, "rb") as file:
                 file.seek(self.DATA_START_OFFSET)
-                page_data = file.read(SecondaryPage.HEADER_SIZE + self.block_factor * self.index_table.record_size)
+                page_data = file.read(SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE)
                 if page_data:
-                    page = SecondaryPage.unpack(page_data, self.block_factor, self.index_table.record_size, self.index_table)
+                    page = SecondaryPage.unpack(page_data, self.block_factor, self.index_record_template.RECORD_SIZE, self.field_type, self.field_size)
                     record_count = len(page.records)
                     print(f"  Página 0: {record_count} registros IndexRecord, next_page: {page.next_page}")
                     for i, record in enumerate(page.records[:5]):
@@ -671,7 +676,7 @@ class ISAMSecondaryIndexINT(ISAMSecondaryBase):
         super().__init__(field_name, primary_isam, filename)
         self.field_type = "INT"
         self.field_size = 4
-        self.index_table = IndexTable.create_index_table(field_name, "INT", 4)
+        self.index_record_template = IndexRecord("INT", 4)
 
     def _create_index_record(self, secondary_value, primary_key):
         index_record = IndexRecord(self.field_type, self.field_size)
@@ -694,7 +699,7 @@ class ISAMSecondaryIndexINT(ISAMSecondaryBase):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 1))
 
-            page = SecondaryPage([first_record], -1, self.block_factor, self.index_table.record_size)
+            page = SecondaryPage([first_record], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
             file.write(page.pack())
 
         with open(self.root_index_filename, "wb") as root_file:
@@ -896,7 +901,7 @@ class ISAMSecondaryIndexCHAR(ISAMSecondaryBase):
         self.field_type = "CHAR"
         self.field_size = field_size
         self.max_key_size = field_size
-        self.index_table = IndexTable.create_index_table(field_name, "CHAR", field_size)
+        self.index_record_template = IndexRecord("CHAR", field_size)
 
     def _create_index_record(self, secondary_value, primary_key):
         index_record = IndexRecord(self.field_type, self.field_size)
@@ -926,7 +931,7 @@ class ISAMSecondaryIndexCHAR(ISAMSecondaryBase):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 1))
 
-            page = SecondaryPage([first_record], -1, self.block_factor, self.index_table.record_size)
+            page = SecondaryPage([first_record], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
             file.write(page.pack())
 
         with open(self.root_index_filename, "wb") as root_file:

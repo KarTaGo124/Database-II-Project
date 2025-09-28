@@ -3,9 +3,9 @@
 import struct
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from indexes.core.record import Record, Table, IndexRecord, IndexTable
+from indexes.core.record import Record, Table, IndexRecord
 
 
 def test_basic_record():
@@ -228,16 +228,17 @@ def test_index_table():
     print("-" * 30)
 
     try:
-        index_table = IndexTable.create_index_table("department", "CHAR", 30)
-        print(f"OK IndexTable creada: {index_table.table_name}")
-        print(f"   Campo clave: {index_table.key_field}")
-        print(f"   Número de campos: {len(index_table.all_fields)}")
+        # IndexTable eliminado - ahora usamos IndexRecord directamente
+        index_record = IndexRecord("CHAR", 30)
+        print(f"OK IndexRecord creado para department")
+        print(f"   Campo clave: {index_record.key_field}")
+        print(f"   Número de campos: {len(index_record.value_type_size)}")
 
-        for field_name, field_type, field_size in index_table.all_fields:
+        for field_name, field_type, field_size in index_record.value_type_size:
             print(f"     {field_name}: {field_type}[{field_size}]")
 
     except Exception as e:
-        print(f"ERROR Error creando IndexTable: {e}")
+        print(f"ERROR Error creando IndexRecord: {e}")
         return False
 
     return True

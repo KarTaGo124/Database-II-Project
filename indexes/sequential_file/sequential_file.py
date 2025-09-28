@@ -1,15 +1,16 @@
 import os
 import math
-from typing import List
+from typing import List, Optional, Any
 from ..core.record import Record, Table
 
 class SequentialFile:
-    def __init__(self, main_file: str, aux_file: str, table: Table, k_rec=None):
+    def __init__(self, main_file: str, aux_file: str, table: Table, k_rec: Optional[int] = None):
         self.main_file = main_file
         self.aux_file = aux_file
         self.table = table
         self.list_of_types = table.all_fields
         self.key_field = table.key_field
+        self.record_size = table.record_size
         self.k = k_rec if k_rec is not None else 10
         self.read_count = 0
         self.write_count = 0
@@ -24,14 +25,11 @@ class SequentialFile:
         if not os.path.exists(self.aux_file):
             open(self.aux_file, 'wb').close()
 
-    def _create_record(self):
-        return Record(self.list_of_types, self.key_field)
-
     def reset_counters(self):
         self.read_count = 0
         self.write_count = 0
 
-    def update_k_dynamically(self):
+    def update_k_dynamically(self) -> int:
         if self.total_records > 0:
             new_k = max(1, int(math.log2(self.total_records)))
             self.k = new_k
@@ -49,15 +47,13 @@ class SequentialFile:
         if not os.path.exists(filename):
             return 0
         file_size = os.path.getsize(filename)
-        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
-        return file_size // record_size
+        return file_size // self.record_size
 
     def show_all_records_from_main_and_aux(self) -> List[Record]:
         records = []
-        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
-        
+
         with open(self.main_file, 'rb') as f:
-            while data := f.read(record_size):
+            while data := f.read(self.record_size):
                 self.read_count += 1
                 rec = Record.unpack(data, self.list_of_types, self.key_field)
                 if rec.active:
@@ -65,7 +61,7 @@ class SequentialFile:
         
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'rb') as f:
-                while data := f.read(record_size):
+                while data := f.read(self.record_size):
                     self.read_count += 1
                     rec = Record.unpack(data, self.list_of_types, self.key_field)
                     if rec.active:
@@ -75,10 +71,9 @@ class SequentialFile:
     
     def rebuild(self):
         records = []
-        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
 
         with open(self.main_file, 'rb') as f:
-            while data := f.read(record_size):
+            while data := f.read(self.record_size):
                 self.read_count += 1
                 rec = Record.unpack(data, self.list_of_types, self.key_field)
                 if rec.active:
@@ -86,7 +81,7 @@ class SequentialFile:
 
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'rb') as f:
-                while data := f.read(record_size):
+                while data := f.read(self.record_size):
                     self.read_count += 1
                     rec = Record.unpack(data, self.list_of_types, self.key_field)
                     if rec.active:
@@ -124,18 +119,16 @@ class SequentialFile:
 
         return True
 
-    def delete(self, key):
-        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
-
+    def delete(self, key: Any) -> bool:
         with open(self.main_file, 'r+b') as f:
             i = 0
-            while data := f.read(record_size):
+            while data := f.read(self.record_size):
                 self.read_count += 1
                 rec = Record.unpack(data, self.list_of_types, self.key_field)
                 if rec.get_key() == key:
                     if rec.active:
                         rec.active = False
-                        f.seek(i * record_size)
+                        f.seek(i * self.record_size)
                         f.write(rec.pack())
                         self.write_count += 1
                         self.deleted_count += 1
@@ -151,13 +144,13 @@ class SequentialFile:
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'r+b') as f:
                 i = 0
-                while data := f.read(record_size):
+                while data := f.read(self.record_size):
                     self.read_count += 1
                     rec = Record.unpack(data, self.list_of_types, self.key_field)
                     if rec.get_key() == key:
                         if rec.active:
                             rec.active = False
-                            f.seek(i * record_size)
+                            f.seek(i * self.record_size)
                             f.write(rec.pack())
                             self.write_count += 1
                             self.deleted_count += 1
@@ -173,8 +166,6 @@ class SequentialFile:
         return False
 
     def search(self, key):
-        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
-
         main_size = self.get_file_size(self.main_file)
         if main_size > 0:
             with open(self.main_file, 'rb') as f:
@@ -182,8 +173,8 @@ class SequentialFile:
 
                 while left <= right:
                     mid = (left + right) // 2
-                    f.seek(mid * record_size)
-                    data = f.read(record_size)
+                    f.seek(mid * self.record_size)
+                    data = f.read(self.record_size)
                     self.read_count += 1
 
                     if not data:
@@ -205,7 +196,7 @@ class SequentialFile:
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'rb') as f:
                 while True:
-                    data = f.read(record_size)
+                    data = f.read(self.record_size)
                     if not data:
                         break
 
@@ -222,7 +213,6 @@ class SequentialFile:
 
     def range_search(self, begin_key, end_key):
         results = []
-        record_size = Record(self.list_of_types, self.key_field).RECORD_SIZE
         main_size = self.get_file_size(self.main_file)
 
         if main_size > 0:
@@ -231,8 +221,8 @@ class SequentialFile:
                 left, right = 0, main_size - 1
                 while left <= right:
                     mid = (left + right) // 2
-                    f.seek(mid * record_size)
-                    data = f.read(record_size)
+                    f.seek(mid * self.record_size)
+                    data = f.read(self.record_size)
                     if data:
                         self.read_count += 1
                         rec = Record.unpack(data, self.list_of_types, self.key_field)
@@ -243,9 +233,9 @@ class SequentialFile:
                             left = mid + 1
 
             with open(self.main_file, 'rb') as f:
-                f.seek(start_pos * record_size)
+                f.seek(start_pos * self.record_size)
                 for i in range(start_pos, main_size):
-                    data = f.read(record_size)
+                    data = f.read(self.record_size)
                     if not data:
                         break
                     self.read_count += 1
@@ -257,7 +247,7 @@ class SequentialFile:
 
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'rb') as f:
-                while data := f.read(record_size):
+                while data := f.read(self.record_size):
                     self.read_count += 1
                     rec = Record.unpack(data, self.list_of_types, self.key_field)
                     if rec.active and begin_key <= rec.get_key() <= end_key:
