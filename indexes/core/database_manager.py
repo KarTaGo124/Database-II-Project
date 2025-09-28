@@ -101,11 +101,34 @@ class DatabaseManager:
 
         if field_name is None:
             primary_index = table_info["primary_index"]
-            return primary_index.search(value)
+            result = primary_index.search(value)
+            if result.data:
+                return OperationResult([result.data], result.execution_time_ms, result.disk_reads, result.disk_writes)
+            else:
+                return OperationResult([], result.execution_time_ms, result.disk_reads, result.disk_writes)
 
         elif field_name in table_info["secondary_indexes"]:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
-            return secondary_index.search(value)
+            primary_index = table_info["primary_index"]
+
+            secondary_result = secondary_index.search(value)
+            if not secondary_result.data:
+                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
+
+            matching_records = []
+            total_reads = secondary_result.disk_reads
+            total_writes = secondary_result.disk_writes
+            total_time = secondary_result.execution_time_ms
+
+            for primary_key in secondary_result.data:
+                primary_result = primary_index.search(primary_key)
+                if primary_result.data:
+                    matching_records.append(primary_result.data)
+                total_reads += primary_result.disk_reads
+                total_writes += primary_result.disk_writes
+                total_time += primary_result.execution_time_ms
+
+            return OperationResult(matching_records, total_time, total_reads, total_writes)
 
         else:
             table = table_info["table"]
@@ -149,7 +172,26 @@ class DatabaseManager:
 
         elif field_name in table_info["secondary_indexes"]:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
-            return secondary_index.range_search(start_key, end_key)
+            primary_index = table_info["primary_index"]
+
+            secondary_result = secondary_index.range_search(start_key, end_key)
+            if not secondary_result.data:
+                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
+
+            matching_records = []
+            total_reads = secondary_result.disk_reads
+            total_writes = secondary_result.disk_writes
+            total_time = secondary_result.execution_time_ms
+
+            for primary_key in secondary_result.data:
+                primary_result = primary_index.search(primary_key)
+                if primary_result.data:
+                    matching_records.append(primary_result.data)
+                total_reads += primary_result.disk_reads
+                total_writes += primary_result.disk_writes
+                total_time += primary_result.execution_time_ms
+
+            return OperationResult(matching_records, total_time, total_reads, total_writes)
 
         else:
             table = table_info["table"]
@@ -195,11 +237,11 @@ class DatabaseManager:
         if field_name is None:
             primary_index = table_info["primary_index"]
 
-            search_result = primary_index.search(value)
-            if search_result.data is None:
+            search_result = self.search(table_name, value)
+            if not search_result.data:
                 return OperationResult(False, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
 
-            record = search_result.data
+            record = search_result.data[0]
             total_reads = search_result.disk_reads
             total_writes = search_result.disk_writes
             total_time = search_result.execution_time_ms
@@ -229,7 +271,7 @@ class DatabaseManager:
             total_writes = search_result.disk_writes
             total_time = search_result.execution_time_ms
 
-            records_to_delete = search_result.data if isinstance(search_result.data, list) else [search_result.data]
+            records_to_delete = search_result.data
 
             for record in records_to_delete:
                 delete_result = self.delete(table_name, record.get_key())

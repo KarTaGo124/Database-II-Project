@@ -222,10 +222,10 @@ class ISAMSecondaryBase:
     def search(self, secondary_value):
         self.performance.start_operation()
 
-        results = []
+        primary_keys = []
 
         if not os.path.exists(self.filename):
-            return self.performance.end_operation(results)
+            return self.performance.end_operation(primary_keys)
 
         search_key = self._get_search_key(secondary_value)
         target_leaf_page_num = self._find_target_leaf_page(search_key)
@@ -241,9 +241,7 @@ class ISAMSecondaryBase:
                     for index_record in page.records:
                         if hasattr(index_record, 'index_value'):
                             if self._values_equal(index_record.index_value, secondary_value):
-                                primary_record = self.primary_isam.search_without_metrics(index_record.primary_key)
-                                if primary_record:
-                                    results.append(primary_record)
+                                primary_keys.append(index_record.primary_key)
                             elif self._value_greater(index_record.index_value, secondary_value):
                                 break
 
@@ -251,14 +249,14 @@ class ISAMSecondaryBase:
                 except:
                     break
 
-        return self.performance.end_operation(results)
+        return self.performance.end_operation(primary_keys)
 
     def range_search(self, start_value, end_value):
         self.performance.start_operation()
-        results = []
+        primary_keys = []
 
         if not os.path.exists(self.filename):
-            return self.performance.end_operation(results)
+            return self.performance.end_operation(primary_keys)
 
         search_key = self._get_search_key(start_value)
         target_leaf_page_num = self._find_target_leaf_page(search_key)
@@ -273,16 +271,14 @@ class ISAMSecondaryBase:
                 for index_record in page.records:
                     if hasattr(index_record, 'index_value'):
                         if self._value_greater(index_record.index_value, end_value):
-                            return self.performance.end_operation(results)
+                            return self.performance.end_operation(primary_keys)
 
                         if self._value_in_range(index_record.index_value, start_value, end_value):
-                            primary_record = self.primary_isam.search(index_record.primary_key)
-                            if primary_record:
-                                results.append(primary_record)
+                            primary_keys.append(index_record.primary_key)
 
                 current_page_num = page.next_page if page.next_page != -1 else None
 
-        return self.performance.end_operation(results)
+        return self.performance.end_operation(primary_keys)
 
     def delete(self, record: Record):
         self.performance.start_operation()

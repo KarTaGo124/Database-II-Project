@@ -35,17 +35,6 @@ class SequentialFile:
             return new_k
         return self.k
 
-    def get_stats(self):
-        last_result = self.performance.last_result if hasattr(self.performance, 'last_result') else None
-        if last_result:
-            return {
-                "Lecturas": last_result.disk_reads,
-                "Escrituras": last_result.disk_writes,
-                "Total": last_result.total_disk_accesses,
-                "Tiempo_ms": last_result.execution_time_ms
-            }
-        return {"Lecturas": 0, "Escrituras": 0, "Total": 0, "Tiempo_ms": 0}
-    
     def get_file_size(self, filename: str) -> int:
         if not os.path.exists(filename):
             return 0
