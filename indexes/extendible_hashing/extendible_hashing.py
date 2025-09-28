@@ -124,140 +124,109 @@ class ExtendableHashing:
         self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, new_bucket.local_depth, 0))
         return new_pos
 
+    def search(self, key):
+        """ Finds all primary keys associated with a secondary key. """
+        bucket = self._get_bucket_from_key(key)
+        packed_records = bucket.get_all_records(self.bucketfile)
 
-    def search(self, value):
-        if self.size == 0:
-            return []
+        matching_pks = []
+        for packed_rec in packed_records:
+            try:
+                # Unpack the record using the class template
+                unpacked = IndexRecord.unpack(packed_rec, self.index_record_template.value_type_size, "index_value")
 
-        bucket = self._get_bucket(value)
-        return bucket.search(self.bucketfile, value, self.primary_index, self.index_record_template)
+                value = unpacked.index_value
+                if isinstance(value, bytes):  # Decode if it's a CHAR/string type
+                    value = value.decode('utf-8').strip('\x00')
 
-    def insert(self, record):
-        field_value = record.get_field_value(self.field_name)
-        primary_key = record.get_key()
+                if value == key:
+                    matching_pks.append(unpacked.primary_key)
+            except struct.error:
+                continue  # Skip malformed or empty (tombstone) records
 
-        index_record = IndexRecord(self.field_type, self.field_size)
-        index_record.set_index_data(field_value, primary_key)
+        return matching_pks
 
-        bucket = self._get_bucket(field_value)
-        success = bucket.insert(index_record, self.bucketfile, self.global_depth)
+    def insert(self, data_record: Record):
+        """ Inserts a new index entry based on a full data record. """
+        secondary_key = getattr(data_record, self.index_record_template.key_field)
+        primary_key = data_record.get_key()
 
-        if not success:
-            if bucket.local_depth < self.global_depth:
-                self._handle_bucket_split(bucket, index_record, field_value)
-            else:
-                self._handle_directory_doubling()
-                self.insert(record)
-                return
+        # Create the specific IndexRecord for this entry
+        index_entry = IndexRecord(self.index_record_template.value_type_size[0][1],
+                                  self.index_record_template.value_type_size[0][2])
+        index_entry.set_index_data(index_value=secondary_key, primary_key=primary_key)
 
-        self.size += 1
-        self._update_header()
+        bucket = self._get_bucket_from_key(secondary_key)
 
-    def delete(self, record):
-        field_value = record.get_field_value(self.field_name)
-        primary_key = record.get_key()
+        # If bucket has space, insert and we're done
+        if bucket.size < BLOCK_FACTOR:
+            bucket.insert(index_entry, self.bucketfile)
+            return
 
-        bucket = self._get_bucket(field_value)
-        deleted = bucket.delete(primary_key, field_value, self.bucketfile, self.index_record_template)
+        # If bucket is full, we must split
+        self._split_bucket(bucket, index_entry)
 
-        if deleted:
-            self.size -= 1
-            self._update_header()
+    def _split_bucket(self, bucket: Bucket, new_record: IndexRecord):
+        """ Handles the logic of splitting a full bucket. """
+        # First, check if we need to double the directory
+        if bucket.local_depth == self.global_depth:
+            self._double_directory()
 
-        return deleted
+        # Get all records from the old bucket, plus the new one
+        all_records_packed = bucket.get_all_records(self.bucketfile)
+        all_records_packed.append(new_record.pack())
 
-    def _delete_from_bucket(self, bucket, primary_key):
-        self.bucketfile.seek(bucket.bucket_pos)
-        local_depth, size, next_bucket = struct.unpack(Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE))
-
-        for i in range(size):
-            self.bucketfile.seek(bucket.bucket_pos + Bucket.HEADER_SIZE + i * 4)
-            stored_key = struct.unpack("i", self.bucketfile.read(4))[0]
-
-            if stored_key == primary_key:
-                self.bucketfile.seek(bucket.bucket_pos + Bucket.HEADER_SIZE + i * 4)
-                self.bucketfile.write(struct.pack("i", -primary_key))
-                return True
-
-        if next_bucket != -1:
-            overflow_bucket = Bucket(next_bucket)
-            return self._delete_from_bucket(overflow_bucket, primary_key)
-
-        return False
-
-    def _handle_bucket_split(self, bucket, index_record, field_value):
-        self.bucketfile.seek(0, os.SEEK_END)
-        new_pos = self.bucketfile.tell()
-
+        # Increment local depth of the old bucket and clear it
         bucket.local_depth += 1
-        new_bucket = Bucket(new_pos, self.index_record_size, local_depth=bucket.local_depth)
-
-        self.bucketfile.seek(new_pos)
-        self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, new_bucket.local_depth, 0, -1))
-
-        all_index_records = bucket.get_all_index_records(self.bucketfile, self.index_record_template)
-        all_index_records.append(index_record)
-
+        bucket.clear(self.bucketfile)
         self.bucketfile.seek(bucket.bucket_pos)
         self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, bucket.local_depth, 0, -1))
 
-        self._update_directory_pointers(bucket, new_bucket)
+        # Create the new sibling bucket
+        new_bucket_pos = self._append_new_bucket(local_depth=bucket.local_depth)
 
-        for idx_record in all_index_records:
-            target_bucket = self._get_bucket(idx_record.index_value)
-            target_bucket.insert(idx_record, self.bucketfile, self.global_depth)
+        # Update directory pointers to the new bucket
+        self._update_directory_pointers(bucket.bucket_pos, new_bucket_pos, bucket.local_depth)
 
-        self._update_directory_pointers(bucket, new_bucket)
+        # Re-distribute all records
+        for packed_rec in all_records_packed:
+            unpacked = IndexRecord.unpack(packed_rec, self.index_record_template.value_type_size, "index_value")
+            key = unpacked.index_value
+            if isinstance(key, bytes):
+                key = key.decode('utf-8').strip('\x00')
 
-        for idx_record in all_index_records:
-            target_bucket = self._get_bucket(idx_record.index_value)
-            target_bucket.insert(idx_record, self.bucketfile, self.global_depth)
+            # Re-insert the unpacked record, which will now go to the correct bucket
+            self.insert(unpacked)  # Recursive call to insert handles finding the right bucket now
 
-    def _update_directory_pointers(self, old_bucket, new_bucket):
-        dir_entries = 2 ** self.global_depth
+    def _double_directory(self):
+        """ Doubles the size of the directory file. """
+        self.dirfile.seek(self.HEADER_SIZE)
+        current_dir = list(struct.iter_unpack(self.DIR_FORMAT, self.dirfile.read()))
 
-        for i in range(dir_entries):
-            self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
-            pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
-
-            if pos == old_bucket.bucket_pos:
-                split_point = 2 ** (old_bucket.local_depth - 1)
-                if i % (2 ** old_bucket.local_depth) < split_point:
-                    self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
-                    self.dirfile.write(struct.pack(self.DIR_FORMAT, old_bucket.bucket_pos))
-                else:
-                    self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
-                    self.dirfile.write(struct.pack(self.DIR_FORMAT, new_bucket.bucket_pos))
-
-    def _handle_directory_doubling(self):
         self.global_depth += 1
-        old_entries = 2 ** (self.global_depth - 1)
-        new_entries = 2 ** self.global_depth
+        self._write_header()
 
-        self.dirfile.seek(0, os.SEEK_END)
-        for i in range(old_entries):
-            self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
-            bucket_pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
+        self.dirfile.seek(self.HEADER_SIZE)
+        # Duplicate all existing entries
+        for entry in current_dir:
+            self.dirfile.write(struct.pack(self.DIR_FORMAT, entry[0]))
+            self.dirfile.write(struct.pack(self.DIR_FORMAT, entry[0]))
 
-            self.dirfile.seek(self.HEADER_SIZE + (old_entries + i) * self.DIR_SIZE)
-            self.dirfile.write(struct.pack(self.DIR_FORMAT, bucket_pos))
+    def _update_directory_pointers(self, old_bucket_pos, new_bucket_pos, local_depth):
+        """ Updates directory entries after a split to point to the new bucket. """
+        dir_size = 2 ** self.global_depth
+        for i in range(dir_size):
+            # Use the local depth to find which entries to update
+            # This hash check mirrors the split condition
+            if (i >> (local_depth - 1)) & 1:
+                self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                current_ptr = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
+                # Only update pointers that still point to the *old* bucket
+                if current_ptr == old_bucket_pos:
+                    self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                    self.dirfile.write(struct.pack(self.DIR_FORMAT, new_bucket_pos))
 
-        self._update_header()
-
-    def drop_index(self):
+    def close(self):
+        """ Closes all file handlers. """
         self.dirfile.close()
         self.bucketfile.close()
-
-        removed_files = []
-        try:
-            os.remove(self.dirname)
-            removed_files.append(self.dirname)
-        except:
-            pass
-        try:
-            os.remove(self.bucketname)
-            removed_files.append(self.bucketname)
-        except:
-            pass
-
-        return removed_files
