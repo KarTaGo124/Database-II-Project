@@ -25,6 +25,6 @@ class InternalNode(Node):
     def __init__(self):
         super().__init__(is_leaf=False)
         self.children = []  # Pointers to child nodes
-        
+
 
 
