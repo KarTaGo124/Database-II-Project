@@ -51,82 +51,79 @@ class Bucket:
         bucketfile.write(struct.pack(self.HEADER_FORMAT, self.local_depth, 0))
 
 
-
-class ExtendibleHashingSecondaryIndex:
-    HEADER_FORMAT = "ii"
+class ExtendableHashing:
+    """ Manages the directory and buckets for the extendible hashing index. """
+    HEADER_FORMAT = "ii"  # global_depth, directory_size
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    DIR_FORMAT = "i"
+    DIR_FORMAT = "i"  # pointer to a bucket
     DIR_SIZE = struct.calcsize(DIR_FORMAT)
 
-    def __init__(self, field_name, field_type, field_size, primary_index, filename, global_depth=3):
-        self.field_name = field_name
-        self.field_type = field_type
-        self.field_size = field_size
-        self.primary_index = primary_index
-        self.filename = filename
-        self.dirname = filename.replace('.dat', '_dir.dat')
-        self.bucketname = filename.replace('.dat', '_bucket.dat')
-        self.global_depth = global_depth
-        self.size = 0
-
-        self.index_record_template = IndexRecord(field_type, field_size)
+    def __init__(self, data_filename, index_field_name, index_field_type, index_field_size):
+        # File and index configuration
+        self.dirname = f"{data_filename}_{index_field_name}.dir"
+        self.bucketname = f"{data_filename}_{index_field_name}.bkt"
+        self.index_record_template = IndexRecord(index_field_type, index_field_size)
         self.index_record_size = self.index_record_template.RECORD_SIZE
 
+        # Open files or create them if they don't exist
         create_new = not os.path.exists(self.dirname) or not os.path.exists(self.bucketname)
-        self.dirfile = open(self.dirname, 'w+b' if create_new else 'r+b')
-        self.bucketfile = open(self.bucketname, 'w+b' if create_new else 'r+b')
+        self.dirfile = open(self.dirname, 'r+b' if not create_new else 'w+b')
+        self.bucketfile = open(self.bucketname, 'r+b' if not create_new else 'w+b')
 
         if create_new:
-            self._initialize_directory()
+            self._initialize_files()
         else:
-            self._load_header()
+            self.global_depth, _ = self._read_header()
 
-    def _initialize_directory(self):
+    def _read_header(self):
         self.dirfile.seek(0)
-        self.dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, self.size))
+        return struct.unpack(self.HEADER_FORMAT, self.dirfile.read(self.HEADER_SIZE))
 
-        dir_entries = 2 ** self.global_depth
-        bucket_space = Bucket.HEADER_SIZE + BLOCK_FACTOR * self.index_record_size
-        bucket0_pos = 0
-        bucket1_pos = bucket0_pos + bucket_space
+    def _write_header(self):
+        self.dirfile.seek(0)
+        dir_size = 2 ** self.global_depth
+        self.dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, dir_size))
 
-        self.bucketfile.seek(bucket0_pos)
-        self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, 1, 0, -1))
-        self.bucketfile.seek(bucket1_pos)
-        self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, 1, 0, -1))
+    def _initialize_files(self, initial_depth=3):
+        """ Sets up the initial directory and two empty buckets. """
+        self.global_depth = initial_depth
+        self._write_header()
 
+        # Create first two buckets
+        bucket0_pos = self._append_new_bucket(local_depth=1)
+        bucket1_pos = self._append_new_bucket(local_depth=1)
+
+        # Point directory entries to the new buckets
         self.dirfile.seek(self.HEADER_SIZE)
-        for i in range(dir_entries):
-            if i % 2 == 0:
-                self.dirfile.write(struct.pack(self.DIR_FORMAT, bucket0_pos))
-            else:
-                self.dirfile.write(struct.pack(self.DIR_FORMAT, bucket1_pos))
+        for i in range(2 ** self.global_depth):
+            bucket_pos = bucket0_pos if (i % 2 == 0) else bucket1_pos
+            self.dirfile.write(struct.pack(self.DIR_FORMAT, bucket_pos))
 
-    def _load_header(self):
-        self.dirfile.seek(0)
-        self.global_depth, self.size = struct.unpack(self.HEADER_FORMAT, self.dirfile.read(self.HEADER_SIZE))
+    def _get_bucket_from_key(self, key):
+        """ Hashes a key to find and return the corresponding Bucket object. """
+        hash_val = hash(key)
+        dir_index =  hash_val % 2**self.global_depth
 
-    def _update_header(self):
-        self.dirfile.seek(0)
-        self.dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, self.size))
-
-    def _get_dir_index(self, value):
-        if isinstance(value, str):
-            hash_val = hash(value)
-        else:
-            hash_val = hash(str(value))
-        return hash_val % (2 ** self.global_depth)
-
-    def _get_bucket(self, value):
-        dir_index = self._get_dir_index(value)
+        # Find the bucket's position from the directory
         self.dirfile.seek(self.HEADER_SIZE + dir_index * self.DIR_SIZE)
         bucket_pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
 
+        # Read the bucket's header and return a Bucket object
         self.bucketfile.seek(bucket_pos)
-        local_depth, size, next_bucket = struct.unpack(
-            Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE)
-        )
-        return Bucket(bucket_pos, self.index_record_size, local_depth, size, next_bucket)
+        local_depth, size = struct.unpack(Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE))
+        return Bucket(bucket_pos, self.index_record_size, local_depth, size)
+
+    def _append_new_bucket(self, local_depth):
+        """ Adds a new, empty bucket to the end of the bucket file. """
+        self.bucketfile.seek(0, 2)
+        new_pos = self.bucketfile.tell()
+
+        new_bucket = Bucket(new_pos, self.index_record_size, local_depth)
+        # Write header for the new bucket
+        self.bucketfile.seek(new_bucket.bucket_pos)
+        self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, new_bucket.local_depth, 0))
+        return new_pos
+
 
     def search(self, value):
         if self.size == 0:
