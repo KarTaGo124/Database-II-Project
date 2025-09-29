@@ -8,7 +8,7 @@ class DatabaseManager:
 
     INDEX_TYPES = {
         "SEQUENTIAL": {"primary": True, "secondary": False},
-        "ISAM": {"primary": True, "secondary": True},
+        "ISAM": {"primary": True, "secondary": False},
         "BTREE": {"primary": True, "secondary": True},
         "HASH": {"primary": False, "secondary": True},
         "RTREE": {"primary": False, "secondary": True}
@@ -115,18 +115,18 @@ class DatabaseManager:
             if not secondary_result.data:
                 return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
 
-            matching_records = []
             total_reads = secondary_result.disk_reads
             total_writes = secondary_result.disk_writes
             total_time = secondary_result.execution_time_ms
 
-            for primary_key in secondary_result.data:
-                primary_result = primary_index.search(primary_key)
-                if primary_result.data:
-                    matching_records.append(primary_result.data)
-                total_reads += primary_result.disk_reads
-                total_writes += primary_result.disk_writes
-                total_time += primary_result.execution_time_ms
+            if secondary_result.data:
+                matching_records = []
+                for primary_key in secondary_result.data:
+                    primary_result = primary_index.search_without_metrics(primary_key)
+                    if primary_result:
+                        matching_records.append(primary_result)
+            else:
+                matching_records = []
 
             return OperationResult(matching_records, total_time, total_reads, total_writes)
 
@@ -136,15 +136,12 @@ class DatabaseManager:
             if not field_info:
                 raise ValueError(f"Field {field_name} not found in table {table_name}")
 
-            performance = PerformanceTracker()
-            performance.start_operation()
-
             primary_index = table_info["primary_index"]
 
             if hasattr(primary_index, 'scanAll'):
+                primary_index.performance.start_operation()
                 all_records = primary_index.scanAll()
-                for _ in all_records:
-                    performance.track_read()
+                scan_result = primary_index.performance.end_operation(all_records)
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
@@ -153,12 +150,16 @@ class DatabaseManager:
                 record_value = getattr(record, field_name, None)
                 if record_value is not None:
                     if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode().strip()
+                        record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
+                    else:
+                        record_value = str(record_value).rstrip()
 
-                    if record_value == value:
+                    value_str = value.decode('utf-8').rstrip('\x00').rstrip() if hasattr(value, 'decode') else str(value).rstrip()
+
+                    if record_value == value_str:
                         matching_records.append(record)
 
-            return performance.end_operation(matching_records)
+            return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
 
     def range_search(self, table_name: str, start_key, end_key, field_name: str = None):
         if table_name not in self.tables:
@@ -178,18 +179,18 @@ class DatabaseManager:
             if not secondary_result.data:
                 return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
 
-            matching_records = []
             total_reads = secondary_result.disk_reads
             total_writes = secondary_result.disk_writes
             total_time = secondary_result.execution_time_ms
 
-            for primary_key in secondary_result.data:
-                primary_result = primary_index.search(primary_key)
-                if primary_result.data:
-                    matching_records.append(primary_result.data)
-                total_reads += primary_result.disk_reads
-                total_writes += primary_result.disk_writes
-                total_time += primary_result.execution_time_ms
+            if secondary_result.data:
+                matching_records = []
+                for primary_key in secondary_result.data:
+                    primary_result = primary_index.search_without_metrics(primary_key)
+                    if primary_result:
+                        matching_records.append(primary_result)
+            else:
+                matching_records = []
 
             return OperationResult(matching_records, total_time, total_reads, total_writes)
 
@@ -199,15 +200,12 @@ class DatabaseManager:
             if not field_info:
                 raise ValueError(f"Field {field_name} not found in table {table_name}")
 
-            performance = PerformanceTracker()
-            performance.start_operation()
-
             primary_index = table_info["primary_index"]
 
             if hasattr(primary_index, 'scanAll'):
+                primary_index.performance.start_operation()
                 all_records = primary_index.scanAll()
-                for _ in all_records:
-                    performance.track_read()
+                scan_result = primary_index.performance.end_operation(all_records)
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
@@ -216,17 +214,18 @@ class DatabaseManager:
                 record_value = getattr(record, field_name, None)
                 if record_value is not None:
                     if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode().strip()
+                        record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
+                    else:
+                        record_value = str(record_value).rstrip()
 
-                    try:
-                        if start_key <= record_value <= end_key:
-                            matching_records.append(record)
-                    except TypeError:
-                        if str(start_key) <= str(record_value) <= str(end_key):
-                            matching_records.append(record)
+                    start_str = start_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(start_key, 'decode') else str(start_key).rstrip()
+                    end_str = end_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(end_key, 'decode') else str(end_key).rstrip()
+
+                    if start_str <= record_value <= end_str:
+                        matching_records.append(record)
 
             matching_records.sort(key=lambda r: getattr(r, field_name))
-            return performance.end_operation(matching_records)
+            return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
 
     def delete(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
@@ -439,17 +438,7 @@ class DatabaseManager:
     def _create_secondary_index(self, table: Table, field_name: str, index_type: str, csv_filename: str):
         field_type, field_size = self._get_field_info(table, field_name)
 
-        if index_type == "ISAM":
-            from ..isam.secondary import create_secondary_index
-
-            secondary_dir = os.path.join(self.base_dir, "secondary")
-            os.makedirs(secondary_dir, exist_ok=True)
-            secondary_filename = os.path.join(secondary_dir, f"{field_name}_secondary.dat")
-
-            primary_index = self.tables[table.table_name]["primary_index"]
-            return create_secondary_index(field_name, field_type, field_size, primary_index, secondary_filename)
-
-        elif index_type == "BTREE":
+        if index_type == "BTREE":
             raise NotImplementedError(f"B+Tree secondary index not implemented yet")
         elif index_type == "HASH":
             raise NotImplementedError(f"Hash secondary index not implemented yet")

@@ -3,9 +3,9 @@ from typing import List, Any, Optional
 from ..core.record import Record, Table
 from ..core.performance_tracker import PerformanceTracker
 
-BLOCK_FACTOR = 10
-ROOT_INDEX_BLOCK_FACTOR = 15
-LEAF_INDEX_BLOCK_FACTOR = 20
+BLOCK_FACTOR = 30
+ROOT_INDEX_BLOCK_FACTOR = 50
+LEAF_INDEX_BLOCK_FACTOR = 50
 CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
 
@@ -342,17 +342,21 @@ class ISAMPrimaryIndex:
 
     def _create_initial_files(self, record: Record):
         with open(self.filename, "wb") as file:
+            self.performance.track_write()
             file.write(struct.pack(self.HEADER_FORMAT, 0))
             page = Page([record], block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
+            self.performance.track_write()
             file.write(page.pack())
 
         with open(self.leaf_index_file, "wb") as file:
             initial_entry = LeafIndexEntry(record.get_key(), 0)
             leaf_index = LeafIndex([initial_entry], leaf_index_block_factor=self.leaf_index_block_factor)
+            self.performance.track_write()
             file.write(leaf_index.pack())
 
         with open(self.root_index_file, "wb") as file:
             root_index = RootIndex([], root_index_block_factor=self.root_index_block_factor)
+            self.performance.track_write()
             file.write(root_index.pack())
 
         self.free_list_stack.clear()
@@ -507,6 +511,7 @@ class ISAMPrimaryIndex:
         page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         new_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
         right_page = Page(right_records, block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
+        self.performance.track_write()
         file.write(right_page.pack())
 
         separator_key = right_records[0].get_key()
@@ -530,6 +535,7 @@ class ISAMPrimaryIndex:
         page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
         new_data_page_num = (file.tell() - self.DATA_START_OFFSET) // page_size
         right_page = Page(right_records, block_factor=self.block_factor, record_size=self.record_template.RECORD_SIZE)
+        self.performance.track_write()
         file.write(right_page.pack())
         self.next_page_number = new_data_page_num + 1
 
@@ -616,6 +622,31 @@ class ISAMPrimaryIndex:
             visited.add(current_page_num)
             try:
                 page = self._read_page(file, current_page_num)
+
+                for record in page.records:
+                    if record.get_key() == key_value:
+                        return record
+
+                current_page_num = page.next_page if page.next_page != -1 else -1
+            except:
+                break
+
+        return None
+
+    def _search_in_page_chain_no_tracking(self, file, start_page_num, key_value):
+        """Versión optimizada sin tracking para search_without_metrics"""
+        current_page_num = start_page_num
+        visited = set()
+
+        while current_page_num != -1 and current_page_num not in visited:
+            visited.add(current_page_num)
+            try:
+                # Leer página sin tracking
+                page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
+                offset = self.DATA_START_OFFSET + (current_page_num * page_size)
+                file.seek(offset)
+                page_data = file.read(page_size)
+                page = Page.unpack(page_data, self.block_factor, self.record_template.RECORD_SIZE, self.table)
 
                 for record in page.records:
                     if record.get_key() == key_value:
@@ -845,22 +876,60 @@ class ISAMPrimaryIndex:
         if not os.path.exists(self.filename):
             return self.performance.end_operation(None)
 
-        target_leaf_page_num = self._find_target_leaf_page(key_value)
-        target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
+        with open(self.root_index_file, "rb") as root_file, \
+             open(self.leaf_index_file, "rb") as leaf_file, \
+             open(self.filename, "rb") as data_file:
 
-        with open(self.filename, "rb") as file:
-            result = self._search_in_page_chain(file, target_data_page_num, key_value)
+            root_index = self._read_root_index(root_file, 0)
+            target_leaf_page_num = root_index.find_leaf_page_for_key(key_value)
+
+            leaf_index = self._read_leaf_index(leaf_file, target_leaf_page_num)
+            target_data_page_num = leaf_index.find_data_page_for_key(key_value)
+
+            result = self._search_in_page_chain(data_file, target_data_page_num, key_value)
             return self.performance.end_operation(result)
 
     def search_without_metrics(self, key_value):
         if not os.path.exists(self.filename):
             return None
 
-        target_leaf_page_num = self._find_target_leaf_page(key_value)
-        target_data_page_num = self._find_target_data_page(key_value, target_leaf_page_num)
+        with open(self.root_index_file, "rb") as root_file, \
+             open(self.leaf_index_file, "rb") as leaf_file, \
+             open(self.filename, "rb") as data_file:
 
-        with open(self.filename, "rb") as file:
-            return self._search_in_page_chain(file, target_data_page_num, key_value)
+            root_index = RootIndex.unpack(root_file.read(RootIndex.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE), self.root_index_block_factor)
+            target_leaf_page_num = root_index.find_leaf_page_for_key(key_value)
+
+            leaf_file.seek(target_leaf_page_num * (LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE))
+            leaf_data = leaf_file.read(LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE)
+            leaf_index = LeafIndex.unpack(leaf_data, self.leaf_index_block_factor)
+            target_data_page_num = leaf_index.find_data_page_for_key(key_value)
+
+            return self._search_in_page_chain_no_tracking(data_file, target_data_page_num, key_value)
+
+    def batch_search(self, key_list):
+        self.performance.start_operation()
+        results = []
+
+        if not os.path.exists(self.filename):
+            return self.performance.end_operation(results)
+
+        with open(self.root_index_file, "rb") as root_file, \
+             open(self.leaf_index_file, "rb") as leaf_file, \
+             open(self.filename, "rb") as data_file:
+
+            for key_value in key_list:
+                root_index = self._read_root_index(root_file, 0)
+                target_leaf_page_num = root_index.find_leaf_page_for_key(key_value)
+
+                leaf_index = self._read_leaf_index(leaf_file, target_leaf_page_num)
+                target_data_page_num = leaf_index.find_data_page_for_key(key_value)
+
+                result = self._search_in_page_chain(data_file, target_data_page_num, key_value)
+                if result:
+                    results.append(result)
+
+        return self.performance.end_operation(results)
 
     def delete(self, key_value):
         self.performance.start_operation()
@@ -951,7 +1020,7 @@ class ISAMPrimaryIndex:
         self.next_leaf_index_page_number = 0
 
         for record in all_records:
-            self.add(record)
+            self.insert(record)
 
         for backup in backup_files:
             if os.path.exists(backup):

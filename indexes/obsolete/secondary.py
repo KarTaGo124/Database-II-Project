@@ -3,9 +3,9 @@ import struct
 from ..core.record import Record, IndexRecord
 from ..core.performance_tracker import PerformanceTracker
 
-BLOCK_FACTOR = 10
-ROOT_INDEX_BLOCK_FACTOR = 15
-LEAF_INDEX_BLOCK_FACTOR = 20
+BLOCK_FACTOR = 30
+ROOT_INDEX_BLOCK_FACTOR = 50
+LEAF_INDEX_BLOCK_FACTOR = 50
 CONSOLIDATION_THRESHOLD = BLOCK_FACTOR // 3
 
 
@@ -270,9 +270,6 @@ class ISAMSecondaryBase:
 
                 for index_record in page.records:
                     if hasattr(index_record, 'index_value'):
-                        if self._value_greater(index_record.index_value, end_value):
-                            return self.performance.end_operation(primary_keys)
-
                         if self._value_in_range(index_record.index_value, start_value, end_value):
                             primary_keys.append(index_record.primary_key)
 
@@ -414,6 +411,7 @@ class ISAMSecondaryBase:
                 # For now, we assume single main page (page 0) with overflow chain
                 file.seek(self.DATA_START_OFFSET)
                 page_data = file.read(page_size)
+                self.performance.track_read()
 
                 if len(page_data) >= SecondaryPage.HEADER_SIZE:
                     try:
@@ -425,6 +423,7 @@ class ISAMSecondaryBase:
                         while next_page_num > 0 and next_page_num < num_pages:
                             file.seek(self.DATA_START_OFFSET + next_page_num * page_size)
                             page_data = file.read(page_size)
+                            self.performance.track_read()
                             if len(page_data) < SecondaryPage.HEADER_SIZE:
                                 break
                             try:
