@@ -8,7 +8,7 @@ class Catalog:
     def __init__(self):
         self.tables = {}  # name -> dict(rows, pages, width, indexes={col: kind}, key='id')
     def register_table(self, name, rows, pages, width, indexes):
-        # indexes: dict(col -> "ISAM"|"BTREE"|"EXTENDIBLE"|...)
+        # indexes: dict(col -> "ISAM"|"BTREE"|"HASH"|...)
         self.tables[name] = {
             "rows": rows, "pages": pages, "width": width,
             "indexes": indexes
@@ -22,7 +22,7 @@ class PlanNode:
         self.kind = kind              # "IndexScan" | "SeqScan"
         self.table = table
         self.index_col = index_col    # columna de índice
-        self.index_kind = index_kind  # ISAM/BTREE/EXTENDIBLE
+        self.index_kind = index_kind  # ISAM/BTREE/HASH
         self.op = op                  # "==", "BETWEEN"
 
 def plan_select(sel: SelectPlan, cat: Catalog) -> PlanNode:
@@ -42,9 +42,9 @@ def plan_select(sel: SelectPlan, cat: Catalog) -> PlanNode:
                 return PlanNode("IndexScan", sel.table, col, "ISAM", op="==")
             if kind == "BTREE":
                 return PlanNode("IndexScan", sel.table, col, "BTREE", op="==")
-            if kind == "EXTENDIBLE":
+            if kind == "HASH":
                 # Hash solo para igualdad
-                return PlanNode("IndexScan", sel.table, col, "EXTENDIBLE", op="==")
+                return PlanNode("IndexScan", sel.table, col, "HASH", op="==")
         # si no hay índice para esa col:
         return PlanNode("SeqScan", sel.table, op="equality")
 
@@ -63,7 +63,7 @@ def format_plan(p: PlanNode) -> str:
             return f"Seq Scan\n  -> filter: {p.op}"
         return "Seq Scan"
     if p.kind == "IndexScan":
-        extra = " (equality only)" if p.index_kind == "EXTENDIBLE" and p.op == "==" else ""
+        extra = " (equality only)" if p.index_kind == "HASH" and p.op == "==" else ""
         return f"Index Scan using {p.index_kind}{extra}\n  -> index_col={p.index_col}, op={p.op}"
     return f"{p.kind}"
 

@@ -13,7 +13,7 @@ class ColumnDef:
     name: str
     type: ColumnType
     is_key: bool = False
-    index: Optional[str] = None  # "ISAM" | "BTREE" | "RTREE" | "SEQ" | "EXTENDIBLE"
+    index: Optional[str] = None  # "ISAM" | "BTREE" | "RTREE" | "SEQ" | "HASH"
 
 # Planes
 

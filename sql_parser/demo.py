@@ -9,7 +9,7 @@ from indexes.core.database_manager import DatabaseManager
 
 def build_statements(table: str, csv_path: str) -> List[str]:
     return [
-        f'CREATE TABLE {table} (  id INT KEY INDEX ISAM,  nombre VARCHAR[50] INDEX BTREE,  cantidad INT,  precio FLOAT INDEX EXTENDIBLE,  fecha DATE INDEX BTREE);',
+        f'CREATE TABLE {table} (  id INT KEY INDEX ISAM,  nombre VARCHAR[50] INDEX BTREE,  cantidad INT,  precio FLOAT INDEX HASH,  fecha DATE INDEX BTREE);',
         f'CREATE TABLE {table} FROM FILE "{csv_path}" USING INDEX ISAM(id);',
 
         f'SELECT * FROM {table} WHERE id = 403;',

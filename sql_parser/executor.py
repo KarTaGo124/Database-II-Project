@@ -447,7 +447,7 @@ class Executor:
                 return f"ERROR: Tipo de índice '{plan.index_type}' no soportado para índices secundarios"
 
             self.db.create_index(plan.table, plan.column, plan.index_type.upper())
-            return f"OK: Índice '{plan.index_name}' creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}"
+            return f"OK: Índice creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}"
         except Exception as e:
             return f"ERROR: {e}"
 
@@ -468,19 +468,13 @@ class Executor:
     # ====== DROP INDEX ======
     def _drop_index(self, plan: DropIndexPlan):
         try:
+            field_name = plan.index_name.replace("idx_", "") if plan.index_name.startswith("idx_") else plan.index_name
+
             for table_name, table_data in self.db.tables.items():
-                if "secondary_indexes" in table_data:
-                    for field_name in table_data["secondary_indexes"]:
-                        possible_names = [
-                            f"idx_{table_name}_{field_name}",
-                            f"idx_{field_name}",
-                            field_name,
-                            plan.index_name
-                        ]
-                        if plan.index_name in possible_names or field_name == plan.index_name.replace("idx_", ""):
-                            removed_files = self.db.drop_index(table_name, field_name)
-                            files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
-                            return f"OK: Índice '{plan.index_name}' eliminado{files_info}"
+                if "secondary_indexes" in table_data and field_name in table_data["secondary_indexes"]:
+                    removed_files = self.db.drop_index(table_name, field_name)
+                    files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
+                    return f"OK: Índice eliminado en campo '{field_name}'{files_info}"
 
             return f"ERROR: Índice '{plan.index_name}' no encontrado"
         except Exception as e:
