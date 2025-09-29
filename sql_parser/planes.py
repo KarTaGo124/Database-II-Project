@@ -72,3 +72,18 @@ class DeletePlan:
 @dataclass
 class ExplainPlan:
     inner: Any
+
+@dataclass
+class CreateIndexPlan:
+    index_name: str
+    table: str
+    column: str
+    index_type: str
+
+@dataclass
+class DropTablePlan:
+    table: str
+
+@dataclass
+class DropIndexPlan:
+    index_name: str

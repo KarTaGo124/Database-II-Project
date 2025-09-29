@@ -2,6 +2,7 @@ import csv
 from typing import Dict, Any, List, Tuple, Optional
 from .planes import (
     CreateTablePlan, LoadFromCSVPlan, SelectPlan, InsertPlan, DeletePlan, ExplainPlan,
+    CreateIndexPlan, DropTablePlan, DropIndexPlan,
     ColumnDef, ColumnType, PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN
 )
 from indexes.core.record import Table, Record
@@ -22,8 +23,14 @@ class Executor:
             return self._insert(plan)
         elif isinstance(plan, DeletePlan):
             return self._delete(plan)
+        elif isinstance(plan, CreateIndexPlan):
+            return self._create_index(plan)
+        elif isinstance(plan, DropTablePlan):
+            return self._drop_table(plan)
+        elif isinstance(plan, DropIndexPlan):
+            return self._drop_index(plan)
         elif isinstance(plan, ExplainPlan):
-            return None
+            return self._explain(plan)
         else:
             raise NotImplementedError(f"Plan no soportado: {type(plan)}")
 
@@ -434,3 +441,62 @@ class Executor:
             except Exception:
                 deleted = 0
             return f"OK ({deleted} registros)"
+
+    # ====== CREATE INDEX ======
+    def _create_index(self, plan: CreateIndexPlan):
+        try:
+            if not self.db._validate_secondary_index(plan.index_type.upper()):
+                return f"ERROR: Tipo de índice '{plan.index_type}' no soportado para índices secundarios"
+
+            self.db.create_index(plan.table, plan.column, plan.index_type.upper())
+            return f"OK: Índice '{plan.index_name}' creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    # ====== DROP TABLE ======
+    def _drop_table(self, plan: DropTablePlan):
+        try:
+            if plan.table not in self.db.tables:
+                return f"ERROR: Tabla '{plan.table}' no existe"
+
+            # Usar método nativo del DatabaseManager
+            removed_files = self.db.drop_table(plan.table)
+            files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
+
+            return f"OK: Tabla '{plan.table}' eliminada{files_info}"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    # ====== DROP INDEX ======
+    def _drop_index(self, plan: DropIndexPlan):
+        try:
+            # Buscar el índice por nombre en todas las tablas
+            found_table = None
+            found_field = None
+
+            for table_name, table_data in self.db.tables.items():
+                if "secondary_indexes" in table_data:
+                    for field_name, index_info in table_data["secondary_indexes"].items():
+                        # Buscar índice por múltiples patrones de nombre
+                        possible_names = [
+                            f"idx_{table_name}_{field_name}",  # idx_productos_precio
+                            f"idx_{field_name}",               # idx_precio
+                            field_name,                        # precio
+                            plan.index_name                    # nombre exacto
+                        ]
+                        if plan.index_name in possible_names or field_name == plan.index_name.replace("idx_", ""):
+                            found_table = table_name
+                            found_field = field_name
+                            break
+                if found_table:
+                    break
+
+            if found_table and found_field:
+                # Usar método nativo del DatabaseManager
+                removed_files = self.db.drop_index(found_table, found_field)
+                files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
+                return f"OK: Índice '{plan.index_name}' eliminado{files_info}"
+            else:
+                return f"ERROR: Índice '{plan.index_name}' no encontrado"
+        except Exception as e:
+            return f"ERROR: {e}"
