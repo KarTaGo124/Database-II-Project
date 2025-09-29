@@ -2,6 +2,7 @@ from .planes import (
     ColumnType, ColumnDef,
     CreateTablePlan, LoadFromCSVPlan,
     SelectPlan, InsertPlan, DeletePlan, ExplainPlan,
+    CreateIndexPlan, DropTablePlan, DropIndexPlan,
     PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN,
 )
 
@@ -177,7 +178,25 @@ class _T(Transformer):
         table = _tok2str(items[0])
         where = items[1] if len(items) > 1 else None
         return DeletePlan(table=table, where=where)
-    
+
+    # ==== CREATE INDEX ====
+    def create_index(self, items):
+        index_name = _tok2str(items[0])
+        table = _tok2str(items[1])
+        column = _tok2str(items[2])
+        index_type = _tok2str(items[3])
+        return CreateIndexPlan(index_name=index_name, table=table, column=column, index_type=index_type)
+
+    # ==== DROP TABLE ====
+    def drop_table(self, items):
+        table = _tok2str(items[0])
+        return DropTablePlan(table=table)
+
+    # ==== DROP INDEX ====
+    def drop_index(self, items):
+        index_name = _tok2str(items[0])
+        return DropIndexPlan(index_name=index_name)
+
     def start(self, items):
         return items
 

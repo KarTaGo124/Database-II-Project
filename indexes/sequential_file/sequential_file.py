@@ -35,17 +35,6 @@ class SequentialFile:
             return new_k
         return self.k
 
-    def get_stats(self):
-        last_result = self.performance.last_result if hasattr(self.performance, 'last_result') else None
-        if last_result:
-            return {
-                "Lecturas": last_result.disk_reads,
-                "Escrituras": last_result.disk_writes,
-                "Total": last_result.total_disk_accesses,
-                "Tiempo_ms": last_result.execution_time_ms
-            }
-        return {"Lecturas": 0, "Escrituras": 0, "Total": 0, "Tiempo_ms": 0}
-    
     def get_file_size(self, filename: str) -> int:
         if not os.path.exists(filename):
             return 0
@@ -57,6 +46,7 @@ class SequentialFile:
 
         with open(self.main_file, 'rb') as f:
             while data := f.read(self.record_size):
+                self.performance.track_read()
                 rec = Record.unpack(data, self.list_of_types, self.key_field)
                 if rec.active:
                     records.append(rec)
@@ -64,10 +54,11 @@ class SequentialFile:
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'rb') as f:
                 while data := f.read(self.record_size):
+                    self.performance.track_read()
                     rec = Record.unpack(data, self.list_of_types, self.key_field)
                     if rec.active:
                         records.append(rec)
-        
+
         return records
     
     def rebuild(self):
@@ -99,6 +90,38 @@ class SequentialFile:
         self.total_records = len(records)
         self.update_k_dynamically()
 
+    def _rebuild_with_tracking(self):
+        records = []
+
+        with open(self.main_file, 'rb') as f:
+            while data := f.read(self.record_size):
+                self.performance.track_read()
+                rec = Record.unpack(data, self.list_of_types, self.key_field)
+                if rec.active:
+                    records.append(rec)
+
+        if os.path.exists(self.aux_file):
+            with open(self.aux_file, 'rb') as f:
+                while data := f.read(self.record_size):
+                    self.performance.track_read()
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    if rec.active:
+                        records.append(rec)
+            os.remove(self.aux_file)
+
+        records.sort(key=lambda r: r.get_key())
+
+        with open(self.main_file, 'wb') as f:
+            for record in records:
+                self.performance.track_write()
+                f.write(record.pack())
+
+        open(self.aux_file, 'wb').close()
+
+        self.deleted_count = 0
+        self.total_records = len(records)
+        self.update_k_dynamically()
+
     def insert(self, record: Record):
         self.performance.start_operation()
 
@@ -115,7 +138,7 @@ class SequentialFile:
 
         aux_size = self.get_file_size(self.aux_file)
         if aux_size > self.k:
-            self.rebuild()
+            self._rebuild_with_tracking()
 
         return self.performance.end_operation(True)
 
@@ -166,26 +189,41 @@ class SequentialFile:
     def delete(self, key: Any):
         self.performance.start_operation()
 
-        with open(self.main_file, 'r+b') as f:
-            i = 0
-            while data := f.read(self.record_size):
-                self.performance.track_read()
-                rec = Record.unpack(data, self.list_of_types, self.key_field)
-                if rec.get_key() == key:
-                    if rec.active:
-                        rec.active = False
-                        f.seek(i * self.record_size)
-                        f.write(rec.pack())
-                        self.performance.track_write()
-                        self.deleted_count += 1
+        main_size = self.get_file_size(self.main_file)
+        if main_size > 0:
+            with open(self.main_file, 'r+b') as f:
+                left, right = 0, main_size - 1
 
-                        if self.total_records > 0 and self.deleted_count > (self.total_records * 0.1):
-                            self.rebuild()
+                while left <= right:
+                    mid = (left + right) // 2
+                    f.seek(mid * self.record_size)
+                    data = f.read(self.record_size)
+                    self.performance.track_read()
 
-                        return self.performance.end_operation(True)
+                    if not data:
+                        break
+
+                    rec = Record.unpack(data, self.list_of_types, self.key_field)
+                    rec_key = rec.get_key()
+
+                    if rec_key == key:
+                        if rec.active:
+                            rec.active = False
+                            f.seek(mid * self.record_size)
+                            f.write(rec.pack())
+                            self.performance.track_write()
+                            self.deleted_count += 1
+
+                            if self.total_records > 0 and self.deleted_count > (self.total_records * 0.1):
+                                self._rebuild_with_tracking()
+
+                            return self.performance.end_operation(True)
+                        else:
+                            return self.performance.end_operation(False)
+                    elif rec_key < key:
+                        left = mid + 1
                     else:
-                        return self.performance.end_operation(False)
-                i += 1
+                        right = mid - 1
 
         if os.path.exists(self.aux_file):
             with open(self.aux_file, 'r+b') as f:
@@ -202,7 +240,7 @@ class SequentialFile:
                             self.deleted_count += 1
 
                             if self.total_records > 0 and self.deleted_count > (self.total_records * 0.1):
-                                self.rebuild()
+                                self._rebuild_with_tracking()
 
                             return self.performance.end_operation(True)
                         else:
@@ -258,6 +296,17 @@ class SequentialFile:
                             return self.performance.end_operation(None)
 
         return self.performance.end_operation(None)
+
+    def batch_search(self, key_list):
+        self.performance.start_operation()
+        results = []
+
+        for key in key_list:
+            result = self.search_without_metrics(key)
+            if result:
+                results.append(result)
+
+        return self.performance.end_operation(results)
 
     def range_search(self, begin_key, end_key):
         self.performance.start_operation()

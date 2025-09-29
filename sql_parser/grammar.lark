@@ -3,6 +3,9 @@ start: stmt (";" stmt)* ";"?
 ?stmt: explain_stmt
      | create_table
      | create_from_file
+     | create_index
+     | drop_table
+     | drop_index
      | select_stmt
      | insert_stmt
      | delete_stmt
@@ -27,6 +30,15 @@ ident_or_string: IDENT | STRING
 # ===== CREATE FROM FILE =====
 # Usamos STRING (ESCAPED_STRING) en una sola línea para evitar ambigüedades
 create_from_file: "CREATE" "TABLE" IDENT "FROM" "FILE" STRING "USING" "INDEX" index_kind "(" (ident_or_string | "(" ident_or_string "," ident_or_string ")") ")"
+
+# ===== CREATE INDEX =====
+create_index: "CREATE" "INDEX" IDENT "ON" IDENT "(" IDENT ")" "USING" index_kind
+
+# ===== DROP TABLE =====
+drop_table: "DROP" "TABLE" IDENT
+
+# ===== DROP INDEX =====
+drop_index: "DROP" "INDEX" IDENT
 
 # ===== SELECT =====
 select_all: "*"
