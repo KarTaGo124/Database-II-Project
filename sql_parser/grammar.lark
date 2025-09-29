@@ -1,7 +1,6 @@
 start: stmt (";" stmt)* ";"?
 
-?stmt: explain_stmt
-     | create_table
+?stmt: create_table
      | create_from_file
      | create_index
      | drop_table
@@ -9,8 +8,6 @@ start: stmt (";" stmt)* ";"?
      | select_stmt
      | insert_stmt
      | delete_stmt
-
-explain_stmt: "EXPLAIN" ["ANALYZE"] select_stmt  -> explain_select
 
 # ===== CREATE TABLE =====
 KEY: "KEY"

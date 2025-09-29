@@ -1,7 +1,7 @@
-from .planes import (
+from .plan_types import (
     ColumnType, ColumnDef,
     CreateTablePlan, LoadFromCSVPlan,
-    SelectPlan, InsertPlan, DeletePlan, ExplainPlan,
+    SelectPlan, InsertPlan, DeletePlan,
     CreateIndexPlan, DropTablePlan, DropIndexPlan,
     PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN,
 )
@@ -10,7 +10,7 @@ from lark import Lark, Transformer, Token
 from typing import Any, List
 
 # Cargar gramática desde archivo grammar.lark
-with open(__file__.replace("parser_sql.py", "grammar.lark"), "r", encoding="utf-8") as f:
+with open(__file__.replace("parser.py", "grammar.lark"), "r", encoding="utf-8") as f:
     _GRAMMAR = f.read()
 
 _PARSER = Lark(_GRAMMAR, start="start", parser="lalr")
@@ -156,8 +156,6 @@ class _T(Transformer):
         where = items[2] if len(items) > 2 else None
         return SelectPlan(table=table, columns=cols_or_none, where=where)
 
-    def explain_select(self, items):
-        return ExplainPlan(inner=items[0])
 
     # ==== INSERT ====
     def insert_stmt(self, items):

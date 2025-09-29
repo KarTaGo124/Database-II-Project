@@ -70,10 +70,6 @@ class DeletePlan:
     where: Any
 
 @dataclass
-class ExplainPlan:
-    inner: Any
-
-@dataclass
 class CreateIndexPlan:
     index_name: str
     table: str

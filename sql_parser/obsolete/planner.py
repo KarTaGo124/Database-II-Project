@@ -1,6 +1,6 @@
 #Esto es para el PLAN DE EJECUCIÓN
 from typing import Optional, Dict
-from .planes import (
+from .plan_types import (
     SelectPlan, PredicateEq, PredicateBetween, ExplainPlan
 )
 
@@ -66,3 +66,45 @@ def format_plan(p: PlanNode) -> str:
         extra = " (equality only)" if p.index_kind == "EXTENDIBLE" and p.op == "==" else ""
         return f"Index Scan using {p.index_kind}{extra}\n  -> index_col={p.index_col}, op={p.op}"
     return f"{p.kind}"
+
+def physical_explain(db_manager, sel_plan) -> str:
+    table = sel_plan.table
+    where = sel_plan.where
+
+    def _pk_name(db, table: str) -> str:
+        return db.tables[table]["table"].key_field
+
+    def _primary_type(db, table: str) -> str:
+        info = db.get_table_info(table) or {}
+        return str(info.get("primary_type", "ISAM")).upper()
+
+    def _has_secondary(db, table: str, col: str) -> bool:
+        sec = db.tables.get(table, {}).get("secondary_indexes", {}) or {}
+        return col in sec and sec[col] is not None
+
+    pk = _pk_name(db_manager, table)
+    pk_typ = _primary_type(db_manager, table)
+
+    if where is None:
+        primary = db_manager.tables[table]["primary_index"]
+        if hasattr(primary, "scanAll"):
+            return f"Index Full Scan using {pk_typ}\n  -> full scan (scanAll)"
+        return "Seq Scan\n  -> full table"
+
+    if isinstance(where, PredicateEq):
+        col = where.column or pk
+        if col == pk:
+            return f"Index Scan using {pk_typ}\n  -> index_col={pk}, op=== "
+        if _has_secondary(db_manager, table, col):
+            return f"Index Scan using {col}\n  -> index_col={col}, op=== "
+        return "Seq Scan\n  -> filter: equality"
+
+    if isinstance(where, PredicateBetween):
+        col = where.column or pk
+        if col == pk:
+            return f"Index Range Scan using {pk_typ}\n  -> index_col={pk}, op=BETWEEN"
+        if _has_secondary(db_manager, table, col):
+            return f"Index Range Scan using {col}\n  -> index_col={col}, op=BETWEEN"
+        return "Seq Scan\n  -> filter: BETWEEN"
+
+    return "Seq Scan\n  -> filter: (predicado no soportado físicamente)"
