@@ -83,7 +83,7 @@ class _T(Transformer):
         coltype = items[1]
         is_key = False
         index = None
-        VALID = {"SEQ", "ISAM", "BTREE", "RTREE", "HASH"}
+        VALID = {"SEQUENTIAL", "ISAM", "BTREE", "RTREE", "HASH"}
         for it in items[2:]:
             if it == "KEY":
                 is_key = True
