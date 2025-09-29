@@ -422,11 +422,7 @@ class ISAMSecondaryBase:
                 page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
                 num_pages = (file_size - self.DATA_START_OFFSET) // page_size
 
-                # Only read page 0 (main data page) and follow its overflow chain
-                # All other pages are either overflow pages (which will be read via the chain)
-                # or additional main data pages (for multi-page ISAM structures)
-
-                # For now, we assume single main page (page 0) with overflow chain
+            
                 file.seek(self.DATA_START_OFFSET)
                 page_data = file.read(page_size)
                 self.performance.track_read()
@@ -469,29 +465,6 @@ class ISAMSecondaryBase:
             for record in all_primary_records:
                 self.add_to_secondary(record)
 
-    def validate_consistency(self):
-        errors = []
-
-        if not os.path.exists(self.filename):
-            return ["Secondary index file does not exist"]
-
-        try:
-            all_index_records = self.scanAll()
-
-            for index_record in all_index_records:
-                if hasattr(index_record, 'primary_key'):
-                    primary_record = self.primary_isam.search(index_record.primary_key)
-                    if primary_record is None:
-                        errors.append(f"Secondary index references non-existent primary key: {index_record.primary_key}")
-                    else:
-                        secondary_value_in_primary = getattr(primary_record, self.field_name)
-                        if not self._values_equal(secondary_value_in_primary, index_record.index_value):
-                            errors.append(f"Inconsistent secondary value for PK {index_record.primary_key}: secondary={index_record.index_value}, primary={secondary_value_in_primary}")
-
-        except Exception as e:
-            errors.append(f"Error during consistency validation: {str(e)}")
-
-        return errors
 
     def show_structure(self):
         print(f"=== ESTRUCTURA DEL ISAM SECUNDARIO ({self.field_name.upper()}) ===")
@@ -557,6 +530,34 @@ class ISAMSecondaryBase:
                         print(f"    ... y {len(page.records) - 5} más")
         except:
             print("  Error leyendo páginas de datos")
+
+    def drop_index(self):
+        files_to_remove = [
+            self.filename,
+            self.root_index_filename,
+            self.leaf_index_filename,
+            self.free_list_filename
+        ]
+
+        removed_files = []
+        for file_path in files_to_remove:
+            if os.path.exists(file_path):
+                try:
+                    import gc
+                    gc.collect()
+
+                    os.remove(file_path)
+                    removed_files.append(file_path)
+                except OSError as e:
+                    try:
+                        import time
+                        time.sleep(0.01)
+                        os.remove(file_path)
+                        removed_files.append(file_path)
+                    except OSError:
+                        pass
+
+        return removed_files
 
 
 class IntLeafIndexEntry:
@@ -675,36 +676,6 @@ class IntRootIndex:
 
     def is_full(self):
         return len(self.entries) >= self.block_factor
-
-    def drop_index(self):
-        files_to_remove = [
-            self.filename,
-            self.root_index_filename,
-            self.leaf_index_filename,
-            self.free_list_filename
-        ]
-
-        removed_files = []
-        for file_path in files_to_remove:
-            if os.path.exists(file_path):
-                try:
-                    # Force close any open file handles by triggering garbage collection
-                    import gc
-                    gc.collect()
-
-                    os.remove(file_path)
-                    removed_files.append(file_path)
-                except OSError as e:
-                    # Force removal with different approach
-                    try:
-                        import time
-                        time.sleep(0.01)  # Brief delay
-                        os.remove(file_path)
-                        removed_files.append(file_path)
-                    except OSError:
-                        pass
-
-        return removed_files
 
 
 class ISAMSecondaryIndexINT(ISAMSecondaryBase):
@@ -1035,11 +1006,227 @@ class ISAMSecondaryIndexCHAR(ISAMSecondaryBase):
                     print(f"    LeafKey: '{entry.key}' -> DataPage: {entry.data_page_number}")
 
 
+class FloatLeafIndexEntry:
+    FORMAT = "fi"
+    SIZE = struct.calcsize(FORMAT)
+
+    def __init__(self, key: float, data_page_number: int):
+        self.key = key
+        self.data_page_number = data_page_number
+
+    def pack(self) -> bytes:
+        return struct.pack(self.FORMAT, self.key, self.data_page_number)
+
+    @staticmethod
+    def unpack(data: bytes):
+        key, data_page_number = struct.unpack(FloatLeafIndexEntry.FORMAT, data)
+        return FloatLeafIndexEntry(key, data_page_number)
+
+
+class FloatLeafIndex:
+    HEADER_FORMAT = 'i'
+    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+    def __init__(self, entries=None, block_factor=LEAF_INDEX_BLOCK_FACTOR):
+        self.entries = entries if entries else []
+        self.block_factor = block_factor
+        self.SIZE_OF_LEAF_INDEX = self.HEADER_SIZE + self.block_factor * FloatLeafIndexEntry.SIZE
+
+    def pack(self) -> bytes:
+        header = struct.pack(self.HEADER_FORMAT, len(self.entries))
+        entries_data = b''.join(entry.pack() for entry in self.entries)
+        padding = b'\x00' * (FloatLeafIndexEntry.SIZE * (self.block_factor - len(self.entries)))
+        return header + entries_data + padding
+
+    @staticmethod
+    def unpack(data: bytes, block_factor=LEAF_INDEX_BLOCK_FACTOR):
+        count = struct.unpack(FloatLeafIndex.HEADER_FORMAT, data[:FloatLeafIndex.HEADER_SIZE])[0]
+        entries = []
+        offset = FloatLeafIndex.HEADER_SIZE
+
+        for _ in range(count):
+            entry_data = data[offset:offset + FloatLeafIndexEntry.SIZE]
+            entries.append(FloatLeafIndexEntry.unpack(entry_data))
+            offset += FloatLeafIndexEntry.SIZE
+
+        return FloatLeafIndex(entries, block_factor)
+
+    def insert_sorted(self, entry):
+        left, right = 0, len(self.entries)
+        while left < right:
+            mid = (left + right) // 2
+            if self.entries[mid].key < entry.key:
+                left = mid + 1
+            else:
+                right = mid
+        self.entries.insert(left, entry)
+
+    def is_full(self):
+        return len(self.entries) >= self.block_factor
+
+
+class FloatRootIndexEntry:
+    FORMAT = "fi"
+    SIZE = struct.calcsize(FORMAT)
+
+    def __init__(self, key: float, leaf_page_number: int):
+        self.key = key
+        self.leaf_page_number = leaf_page_number
+
+    def pack(self) -> bytes:
+        return struct.pack(self.FORMAT, self.key, self.leaf_page_number)
+
+    @staticmethod
+    def unpack(data: bytes):
+        key, leaf_page_number = struct.unpack(FloatRootIndexEntry.FORMAT, data)
+        return FloatRootIndexEntry(key, leaf_page_number)
+
+
+class FloatRootIndex:
+    HEADER_FORMAT = 'i'
+    HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+    def __init__(self, entries=None, block_factor=ROOT_INDEX_BLOCK_FACTOR):
+        self.entries = entries if entries else []
+        self.block_factor = block_factor
+        self.SIZE_OF_ROOT_INDEX = self.HEADER_SIZE + self.block_factor * FloatRootIndexEntry.SIZE
+
+    def pack(self) -> bytes:
+        header = struct.pack(self.HEADER_FORMAT, len(self.entries))
+        entries_data = b''.join(entry.pack() for entry in self.entries)
+        padding = b'\x00' * (FloatRootIndexEntry.SIZE * (self.block_factor - len(self.entries)))
+        return header + entries_data + padding
+
+    @staticmethod
+    def unpack(data: bytes, block_factor=ROOT_INDEX_BLOCK_FACTOR):
+        count = struct.unpack(FloatRootIndex.HEADER_FORMAT, data[:FloatRootIndex.HEADER_SIZE])[0]
+        entries = []
+        offset = FloatRootIndex.HEADER_SIZE
+
+        for _ in range(count):
+            entry_data = data[offset:offset + FloatRootIndexEntry.SIZE]
+            entries.append(FloatRootIndexEntry.unpack(entry_data))
+            offset += FloatRootIndexEntry.SIZE
+
+        return FloatRootIndex(entries, block_factor)
+
+    def insert_sorted(self, entry):
+        left, right = 0, len(self.entries)
+        while left < right:
+            mid = (left + right) // 2
+            if self.entries[mid].key < entry.key:
+                left = mid + 1
+            else:
+                right = mid
+        self.entries.insert(left, entry)
+
+    def is_full(self):
+        return len(self.entries) >= self.block_factor
+
+
+class ISAMSecondaryIndexFLOAT(ISAMSecondaryBase):
+    def __init__(self, field_name: str, primary_isam, filename=None):
+        super().__init__(field_name, primary_isam, filename)
+        self.field_type = "FLOAT"
+        self.field_size = 4
+        self.index_record_template = IndexRecord("FLOAT", 4)
+
+    def _create_index_record(self, secondary_value, primary_key):
+        index_record = IndexRecord(self.field_type, self.field_size)
+        index_record.set_index_data(secondary_value, primary_key)
+        return index_record
+
+    def _get_search_key(self, secondary_value):
+        return float(secondary_value)
+
+    def _values_equal(self, val1, val2):
+        # Comparación de floats con tolerancia para manejar errores de precisión
+        return abs(float(val1) - float(val2)) < 1e-9
+
+    def _value_greater(self, val1, val2):
+        return float(val1) > float(val2)
+
+    def _value_in_range(self, value, start, end):
+        float_value = float(value)
+        float_start = float(start)
+        float_end = float(end)
+        return float_start <= float_value <= float_end
+
+    def _create_initial_files(self, first_record):
+        with open(self.filename, "wb") as file:
+            file.write(struct.pack(self.HEADER_FORMAT, 1))
+
+            page = SecondaryPage([first_record], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
+            file.write(page.pack())
+
+        with open(self.root_index_filename, "wb") as root_file:
+            root_entry = FloatRootIndexEntry(first_record.get_key(), 0)
+            root_index = FloatRootIndex([root_entry], self.root_index_block_factor)
+            root_file.write(root_index.pack())
+
+        with open(self.leaf_index_filename, "wb") as leaf_file:
+            leaf_entry = FloatLeafIndexEntry(first_record.get_key(), 0)
+            leaf_index = FloatLeafIndex([leaf_entry], self.leaf_index_block_factor)
+            leaf_file.write(leaf_index.pack())
+
+    def _find_target_leaf_page(self, key_value):
+        if not os.path.exists(self.root_index_filename):
+            return 0
+
+        with open(self.root_index_filename, "rb") as file:
+            root_index = FloatRootIndex.unpack(file.read(), self.root_index_block_factor)
+
+        for i in range(len(root_index.entries) - 1, -1, -1):
+            if key_value >= root_index.entries[i].key:
+                return root_index.entries[i].leaf_page_number
+
+        return 0
+
+    def _find_target_data_page(self, key_value, leaf_page_num):
+        if not os.path.exists(self.leaf_index_filename):
+            return 0
+
+        with open(self.leaf_index_filename, "rb") as file:
+            file.seek(leaf_page_num * FloatLeafIndex().SIZE_OF_LEAF_INDEX)
+            leaf_data = file.read(FloatLeafIndex().SIZE_OF_LEAF_INDEX)
+            if len(leaf_data) < FloatLeafIndex().SIZE_OF_LEAF_INDEX:
+                return 0
+            leaf_index = FloatLeafIndex.unpack(leaf_data, self.leaf_index_block_factor)
+
+        for i in range(len(leaf_index.entries) - 1, -1, -1):
+            if key_value >= leaf_index.entries[i].key:
+                return leaf_index.entries[i].data_page_number
+
+        return 0
+
+    def _show_root_structure(self):
+        with open(self.root_index_filename, "rb") as file:
+            root_index = FloatRootIndex.unpack(file.read(), self.root_index_block_factor)
+            for entry in root_index.entries:
+                print(f"  RootKey: {entry.key:.2f} -> LeafPage: {entry.leaf_page_number}")
+
+    def _show_leaf_structure(self):
+        with open(self.leaf_index_filename, "rb") as file:
+            file.seek(0, 2)
+            file_size = file.tell()
+            num_leaf_pages = file_size // FloatLeafIndex().SIZE_OF_LEAF_INDEX
+
+            for i in range(min(3, num_leaf_pages)):
+                file.seek(i * FloatLeafIndex().SIZE_OF_LEAF_INDEX)
+                leaf_data = file.read(FloatLeafIndex().SIZE_OF_LEAF_INDEX)
+                leaf_index = FloatLeafIndex.unpack(leaf_data, self.leaf_index_block_factor)
+                print(f"  Leaf Page {i}:")
+                for entry in leaf_index.entries:
+                    print(f"    LeafKey: {entry.key:.2f} -> DataPage: {entry.data_page_number}")
+
+
 def create_secondary_index(field_name: str, field_type: str, field_size: int, primary_isam, filename=None):
     if field_type == "INT":
         return ISAMSecondaryIndexINT(field_name, primary_isam, filename)
     elif field_type == "CHAR":
         return ISAMSecondaryIndexCHAR(field_name, field_size, primary_isam, filename)
+    elif field_type == "FLOAT":
+        return ISAMSecondaryIndexFLOAT(field_name, primary_isam, filename)
     else:
         raise ValueError(f"Unsupported secondary index type: {field_type}. Supported: INT, CHAR")
 

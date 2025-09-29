@@ -34,12 +34,13 @@ def test_index_operations():
         result = execute_sql(db_manager, "SELECT * FROM productos;")
         print(f"Resultado: {len(result)} registros encontrados")
 
+
         print("\\n4. Creando indice secundario en tabla con datos...")
-        result = execute_sql(db_manager, "CREATE INDEX idx_nombre ON productos (nombre) USING ISAM;")
+        result = execute_sql(db_manager, "CREATE INDEX ON productos (precio) USING ISAM;")
         print(f"Resultado: {result}")
 
         print("\\n5. Verificando busqueda por indice secundario...")
-        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Mouse";')
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE precio = 25.50;')
         print(f"Resultado: {result}")
 
         print("\\n6. Insertando mas datos despues de crear indice...")
@@ -65,7 +66,7 @@ def test_index_operations():
         print(f"Archivos .dat generados: {files}")
 
         print("\\n10. DROP INDEX por nombre...")
-        result = execute_sql(db_manager, "DROP INDEX idx_nombre;")
+        result = execute_sql(db_manager, "DROP INDEX precio;")
         print(f"Resultado: {result}")
 
         print("\\n11. Verificando archivos despues de DROP INDEX...")
@@ -112,6 +113,10 @@ def test_index_operations():
         print(f"Resultado: {result}")
 
         result = execute_sql(db_manager, "SELECT * FROM productos WHERE id = 1;")
+        print(f"Resultado: {result}")
+
+        print("\\n10. DROP INDEX por nombre...")
+        result = execute_sql(db_manager, "DROP INDEX nombre;")
         print(f"Resultado: {result}")
 
         print("\\n[OK] Test de operaciones de indices completado exitosamente!")

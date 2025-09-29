@@ -486,7 +486,7 @@ class DatabaseManager:
         field_type, field_size = self._get_field_info(table, field_name)
 
         if index_type == "ISAM":
-            from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR
+            from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR, ISAMSecondaryIndexFLOAT
 
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
@@ -499,12 +499,21 @@ class DatabaseManager:
                 return ISAMSecondaryIndexINT(field_name, primary_index, filename)
             elif field_type == "CHAR":
                 return ISAMSecondaryIndexCHAR(field_name, field_size, primary_index, filename)
+            elif field_type == "FLOAT":
+                return ISAMSecondaryIndexFLOAT(field_name, primary_index, filename)
             else:
                 raise NotImplementedError(f"ISAM secondary index para tipo {field_type} no implementado")
         elif index_type == "BTREE":
             raise NotImplementedError(f"B+Tree secondary index not implemented yet")
         elif index_type == "HASH":
-            raise NotImplementedError(f"Hash secondary index not implemented yet")
+            from ..extendible_hashing.extendible_hashing import ExtendibleHashing
+
+            secondary_dir = os.path.join(self.base_dir, "secondary")
+            os.makedirs(secondary_dir, exist_ok=True)
+
+            data_filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}")
+
+            return ExtendibleHashing(data_filename, field_name, field_type, field_size, is_primary=False)
         elif index_type == "RTREE":
             raise NotImplementedError(f"R-Tree secondary index not implemented yet")
 
