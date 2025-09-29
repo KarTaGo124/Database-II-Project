@@ -8,7 +8,7 @@ class DatabaseManager:
 
     INDEX_TYPES = {
         "SEQUENTIAL": {"primary": True, "secondary": False},
-        "ISAM": {"primary": True, "secondary": False},
+        "ISAM": {"primary": True, "secondary": True},
         "BTREE": {"primary": True, "secondary": True},
         "HASH": {"primary": False, "secondary": True},
         "RTREE": {"primary": False, "secondary": True}
@@ -210,19 +210,50 @@ class DatabaseManager:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
             matching_records = []
+            field_type, _ = field_info
+
             for record in all_records:
                 record_value = getattr(record, field_name, None)
                 if record_value is not None:
-                    if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
+                    # Manejar tipos de datos apropiadamente
+                    if field_type == "FLOAT":
+                        # Para FLOAT, comparar como números
+                        try:
+                            if hasattr(record_value, 'decode'):
+                                record_value = float(record_value.decode('utf-8').rstrip('\x00'))
+                            else:
+                                record_value = float(record_value)
+                            start_val = float(start_key)
+                            end_val = float(end_key)
+                            if start_val <= record_value <= end_val:
+                                matching_records.append(record)
+                        except (ValueError, TypeError):
+                            continue
+                    elif field_type == "INT":
+                        # Para INT, comparar como enteros
+                        try:
+                            if hasattr(record_value, 'decode'):
+                                record_value = int(record_value.decode('utf-8').rstrip('\x00'))
+                            else:
+                                record_value = int(record_value)
+                            start_val = int(start_key)
+                            end_val = int(end_key)
+                            if start_val <= record_value <= end_val:
+                                matching_records.append(record)
+                        except (ValueError, TypeError):
+                            continue
                     else:
-                        record_value = str(record_value).rstrip()
+                        # Para strings/otros tipos, comparar como strings
+                        if hasattr(record_value, 'decode'):
+                            record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
+                        else:
+                            record_value = str(record_value).rstrip()
 
-                    start_str = start_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(start_key, 'decode') else str(start_key).rstrip()
-                    end_str = end_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(end_key, 'decode') else str(end_key).rstrip()
+                        start_str = start_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(start_key, 'decode') else str(start_key).rstrip()
+                        end_str = end_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(end_key, 'decode') else str(end_key).rstrip()
 
-                    if start_str <= record_value <= end_str:
-                        matching_records.append(record)
+                        if start_str <= record_value <= end_str:
+                            matching_records.append(record)
 
             matching_records.sort(key=lambda r: getattr(r, field_name))
             return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
@@ -438,7 +469,28 @@ class DatabaseManager:
     def _create_secondary_index(self, table: Table, field_name: str, index_type: str, csv_filename: str):
         field_type, field_size = self._get_field_info(table, field_name)
 
-        if index_type == "BTREE":
+        if index_type == "ISAM":
+            from ..obsolete.isam.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR
+
+            secondary_dir = os.path.join(self.base_dir, "secondary")
+            os.makedirs(secondary_dir, exist_ok=True)
+
+            # Obtener el índice primario para pasar como parámetro
+            table_info = self.tables[table.table_name]
+            primary_index = table_info["primary_index"]
+            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_isam")
+
+            # Crear índice secundario según el tipo de campo
+            if field_type == "INT":
+                return ISAMSecondaryIndexINT(field_name, primary_index, filename)
+            elif field_type == "FLOAT":
+                # Para FLOAT, usar INT como aproximación (convertir a centavos por ejemplo)
+                return ISAMSecondaryIndexINT(field_name, primary_index, filename)
+            elif field_type == "CHAR":
+                return ISAMSecondaryIndexCHAR(field_name, field_size, primary_index, filename)
+            else:
+                raise NotImplementedError(f"ISAM secondary index para tipo {field_type} no implementado")
+        elif index_type == "BTREE":
             raise NotImplementedError(f"B+Tree secondary index not implemented yet")
         elif index_type == "HASH":
             raise NotImplementedError(f"Hash secondary index not implemented yet")

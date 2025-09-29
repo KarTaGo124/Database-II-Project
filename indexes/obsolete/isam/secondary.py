@@ -1,7 +1,7 @@
 import os
 import struct
-from ..core.record import Record, IndexRecord
-from ..core.performance_tracker import PerformanceTracker
+from ...core.record import Record, IndexRecord
+from ...core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 30
 ROOT_INDEX_BLOCK_FACTOR = 50
