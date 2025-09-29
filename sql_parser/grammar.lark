@@ -1,7 +1,6 @@
 start: stmt (";" stmt)* ";"?
 
-?stmt: explain_stmt
-     | create_table
+?stmt: create_table
      | create_from_file
      | create_index
      | drop_table
@@ -9,8 +8,6 @@ start: stmt (";" stmt)* ";"?
      | select_stmt
      | insert_stmt
      | delete_stmt
-
-explain_stmt: "EXPLAIN" ["ANALYZE"] select_stmt  -> explain_select
 
 # ===== CREATE TABLE =====
 KEY: "KEY"
@@ -23,7 +20,7 @@ type_spec: "INT"                               -> t_int
          | "VARCHAR" "[" SIGNED_INT "]"        -> t_varchar
          | "ARRAY" "[" "FLOAT" "]"             -> t_array
 
-INDEX_KIND: "SEQ" | "ISAM" | "BTREE" | "RTREE" | "EXTENDIBLE"
+INDEX_KIND: "SEQUENTIAL" | "ISAM" | "BTREE" | "RTREE" | "HASH"
 index_kind: INDEX_KIND
 ident_or_string: IDENT | STRING
 
@@ -32,7 +29,7 @@ ident_or_string: IDENT | STRING
 create_from_file: "CREATE" "TABLE" IDENT "FROM" "FILE" STRING "USING" "INDEX" index_kind "(" (ident_or_string | "(" ident_or_string "," ident_or_string ")") ")"
 
 # ===== CREATE INDEX =====
-create_index: "CREATE" "INDEX" IDENT "ON" IDENT "(" IDENT ")" "USING" index_kind
+create_index: "CREATE" "INDEX" "ON" IDENT "(" IDENT ")" "USING" index_kind
 
 # ===== DROP TABLE =====
 drop_table: "DROP" "TABLE" IDENT

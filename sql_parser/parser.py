@@ -1,7 +1,7 @@
-from .planes import (
+from .plan_types import (
     ColumnType, ColumnDef,
     CreateTablePlan, LoadFromCSVPlan,
-    SelectPlan, InsertPlan, DeletePlan, ExplainPlan,
+    SelectPlan, InsertPlan, DeletePlan,
     CreateIndexPlan, DropTablePlan, DropIndexPlan,
     PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN,
 )
@@ -10,7 +10,7 @@ from lark import Lark, Transformer, Token
 from typing import Any, List
 
 # Cargar gramática desde archivo grammar.lark
-with open(__file__.replace("parser_sql.py", "grammar.lark"), "r", encoding="utf-8") as f:
+with open(__file__.replace("parser.py", "grammar.lark"), "r", encoding="utf-8") as f:
     _GRAMMAR = f.read()
 
 _PARSER = Lark(_GRAMMAR, start="start", parser="lalr")
@@ -83,7 +83,7 @@ class _T(Transformer):
         coltype = items[1]
         is_key = False
         index = None
-        VALID = {"SEQ", "ISAM", "BTREE", "RTREE", "EXTENDIBLE"}
+        VALID = {"SEQUENTIAL", "ISAM", "BTREE", "RTREE", "HASH"}
         for it in items[2:]:
             if it == "KEY":
                 is_key = True
@@ -156,8 +156,6 @@ class _T(Transformer):
         where = items[2] if len(items) > 2 else None
         return SelectPlan(table=table, columns=cols_or_none, where=where)
 
-    def explain_select(self, items):
-        return ExplainPlan(inner=items[0])
 
     # ==== INSERT ====
     def insert_stmt(self, items):
@@ -181,11 +179,10 @@ class _T(Transformer):
 
     # ==== CREATE INDEX ====
     def create_index(self, items):
-        index_name = _tok2str(items[0])
-        table = _tok2str(items[1])
-        column = _tok2str(items[2])
-        index_type = _tok2str(items[3])
-        return CreateIndexPlan(index_name=index_name, table=table, column=column, index_type=index_type)
+        table = _tok2str(items[0])
+        column = _tok2str(items[1])
+        index_type = _tok2str(items[2])
+        return CreateIndexPlan(index_name=column, table=table, column=column, index_type=index_type)
 
     # ==== DROP TABLE ====
     def drop_table(self, items):

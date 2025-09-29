@@ -1,7 +1,7 @@
 import csv
 from typing import Dict, Any, List, Tuple, Optional
-from .planes import (
-    CreateTablePlan, LoadFromCSVPlan, SelectPlan, InsertPlan, DeletePlan, ExplainPlan,
+from .plan_types import (
+    CreateTablePlan, LoadFromCSVPlan, SelectPlan, InsertPlan, DeletePlan,
     CreateIndexPlan, DropTablePlan, DropIndexPlan,
     ColumnDef, ColumnType, PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN
 )
@@ -29,8 +29,6 @@ class Executor:
             return self._drop_table(plan)
         elif isinstance(plan, DropIndexPlan):
             return self._drop_index(plan)
-        elif isinstance(plan, ExplainPlan):
-            return self._explain(plan)
         else:
             raise NotImplementedError(f"Plan no soportado: {type(plan)}")
 
@@ -106,14 +104,14 @@ class Executor:
         for colname, idx_kind in secondary_decls:
             try:
                 if self.db._validate_secondary_index(idx_kind):
-                    self.db.create_index(plan.table, colname, idx_kind)
+                    self.db.create_index(plan.table, colname, idx_kind, scan_existing=False)
                     created_any = True
                 else:
                     unsupported.append(f"{colname}:{idx_kind}")
-            except NotImplementedError:
-                unsupported.append(f"{colname}:{idx_kind}")
-            except Exception:
-                unsupported.append(f"{colname}:{idx_kind}")
+            except NotImplementedError as e:
+                unsupported.append(f"{colname}:{idx_kind}(NotImpl)")
+            except Exception as e:
+                unsupported.append(f"{colname}:{idx_kind}({str(e)[:30]})")
 
         msg_parts = [f"OK: tabla {plan.table} creada (primario={primary_index_type}, key={pk_field})"]
         if ignored_cols:
@@ -449,7 +447,7 @@ class Executor:
                 return f"ERROR: Tipo de índice '{plan.index_type}' no soportado para índices secundarios"
 
             self.db.create_index(plan.table, plan.column, plan.index_type.upper())
-            return f"OK: Índice '{plan.index_name}' creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}"
+            return f"OK: Índice creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}"
         except Exception as e:
             return f"ERROR: {e}"
 
@@ -470,33 +468,14 @@ class Executor:
     # ====== DROP INDEX ======
     def _drop_index(self, plan: DropIndexPlan):
         try:
-            # Buscar el índice por nombre en todas las tablas
-            found_table = None
-            found_field = None
+            field_name = plan.index_name.replace("idx_", "") if plan.index_name.startswith("idx_") else plan.index_name
 
             for table_name, table_data in self.db.tables.items():
-                if "secondary_indexes" in table_data:
-                    for field_name, index_info in table_data["secondary_indexes"].items():
-                        # Buscar índice por múltiples patrones de nombre
-                        possible_names = [
-                            f"idx_{table_name}_{field_name}",  # idx_productos_precio
-                            f"idx_{field_name}",               # idx_precio
-                            field_name,                        # precio
-                            plan.index_name                    # nombre exacto
-                        ]
-                        if plan.index_name in possible_names or field_name == plan.index_name.replace("idx_", ""):
-                            found_table = table_name
-                            found_field = field_name
-                            break
-                if found_table:
-                    break
+                if "secondary_indexes" in table_data and field_name in table_data["secondary_indexes"]:
+                    removed_files = self.db.drop_index(table_name, field_name)
+                    files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
+                    return f"OK: Índice eliminado en campo '{field_name}'{files_info}"
 
-            if found_table and found_field:
-                # Usar método nativo del DatabaseManager
-                removed_files = self.db.drop_index(found_table, found_field)
-                files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
-                return f"OK: Índice '{plan.index_name}' eliminado{files_info}"
-            else:
-                return f"ERROR: Índice '{plan.index_name}' no encontrado"
+            return f"ERROR: Índice '{plan.index_name}' no encontrado"
         except Exception as e:
             return f"ERROR: {e}"

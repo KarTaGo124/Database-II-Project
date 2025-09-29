@@ -13,7 +13,7 @@ class ColumnDef:
     name: str
     type: ColumnType
     is_key: bool = False
-    index: Optional[str] = None  # "ISAM" | "BTREE" | "RTREE" | "SEQ" | "EXTENDIBLE"
+    index: Optional[str] = None  # "ISAM" | "BTREE" | "RTREE" | "SEQUENTIAL" | "HASH"
 
 # Planes
 
@@ -68,10 +68,6 @@ class InsertPlan:
 class DeletePlan:
     table: str
     where: Any
-
-@dataclass
-class ExplainPlan:
-    inner: Any
 
 @dataclass
 class CreateIndexPlan:
