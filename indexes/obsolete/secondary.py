@@ -1,7 +1,7 @@
 import os
 import struct
-from ...core.record import Record, IndexRecord
-from ...core.performance_tracker import PerformanceTracker
+from ..core.record import Record, IndexRecord
+from ..core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 30
 ROOT_INDEX_BLOCK_FACTOR = 50
@@ -180,12 +180,30 @@ class ISAMSecondaryBase:
         self.leaf_index_filename = os.path.join(base_dir, f"{base_name}_leaf.dat")
         self.free_list_filename = os.path.join(base_dir, f"{base_name}_free_list.dat")
 
+        # Clean existing files to ensure fresh index
+        self._clean_existing_files()
+
         self.block_factor = BLOCK_FACTOR
         self.root_index_block_factor = ROOT_INDEX_BLOCK_FACTOR
         self.leaf_index_block_factor = LEAF_INDEX_BLOCK_FACTOR
 
         self.free_list_stack = SecondaryFreeListStack(self.free_list_filename)
         self.performance = PerformanceTracker()
+
+    def _clean_existing_files(self):
+        files_to_clean = [
+            self.filename,
+            self.root_index_filename,
+            self.leaf_index_filename,
+            self.free_list_filename
+        ]
+
+        for file_path in files_to_clean:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
 
     # Operaciones principales
 
@@ -670,10 +688,21 @@ class IntRootIndex:
         for file_path in files_to_remove:
             if os.path.exists(file_path):
                 try:
+                    # Force close any open file handles by triggering garbage collection
+                    import gc
+                    gc.collect()
+
                     os.remove(file_path)
                     removed_files.append(file_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    # Force removal with different approach
+                    try:
+                        import time
+                        time.sleep(0.01)  # Brief delay
+                        os.remove(file_path)
+                        removed_files.append(file_path)
+                    except OSError:
+                        pass
 
         return removed_files
 

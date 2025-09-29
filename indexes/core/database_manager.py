@@ -43,7 +43,7 @@ class DatabaseManager:
         self.tables[table_name] = table_info
         return True
 
-    def create_index(self, table_name: str, field_name: str, index_type: str):
+    def create_index(self, table_name: str, field_name: str, index_type: str, scan_existing: bool = True):
         if table_name not in self.tables:
             raise ValueError(f"Table {table_name} does not exist")
 
@@ -52,6 +52,9 @@ class DatabaseManager:
 
         table_info = self.tables[table_name]
         table = table_info["table"]
+
+        if field_name == table.key_field:
+            raise ValueError(f"Cannot create secondary index on primary key field '{field_name}'")
 
         field_info = self._get_field_info(table, field_name)
         if not field_info:
@@ -68,6 +71,19 @@ class DatabaseManager:
             "index": secondary_index,
             "type": index_type
         }
+
+        if scan_existing:
+            primary_index = table_info["primary_index"]
+            if hasattr(primary_index, 'scanAll'):
+                try:
+                    existing_records = primary_index.scanAll()
+                    for record in existing_records:
+                        secondary_index.insert(record)
+                except Exception as e:
+                    del table_info["secondary_indexes"][field_name]
+                    if hasattr(secondary_index, 'drop_index'):
+                        secondary_index.drop_index()
+                    raise ValueError(f"Error indexing existing records: {e}")
 
         return True
 
@@ -344,7 +360,7 @@ class DatabaseManager:
         table_info = self.tables[table_name]
 
         if field_name not in table_info["secondary_indexes"]:
-            return False
+            raise ValueError(f"Index on field '{field_name}' not found in table '{table_name}'")
 
         secondary_index = table_info["secondary_indexes"][field_name]["index"]
 
@@ -470,21 +486,16 @@ class DatabaseManager:
         field_type, field_size = self._get_field_info(table, field_name)
 
         if index_type == "ISAM":
-            from ..obsolete.isam.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR
+            from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR
 
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
 
-            # Obtener el índice primario para pasar como parámetro
             table_info = self.tables[table.table_name]
             primary_index = table_info["primary_index"]
-            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_isam")
+            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_isam.dat")
 
-            # Crear índice secundario según el tipo de campo
             if field_type == "INT":
-                return ISAMSecondaryIndexINT(field_name, primary_index, filename)
-            elif field_type == "FLOAT":
-                # Para FLOAT, usar INT como aproximación (convertir a centavos por ejemplo)
                 return ISAMSecondaryIndexINT(field_name, primary_index, filename)
             elif field_type == "CHAR":
                 return ISAMSecondaryIndexCHAR(field_name, field_size, primary_index, filename)
