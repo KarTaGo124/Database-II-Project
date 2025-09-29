@@ -1,9 +1,11 @@
 from dataclasses import dataclass
-from typing import List, Optional, Union, Tuple, Any
+from typing import List, Optional, Tuple, Any
+
+# Tipos/Columnas
 
 @dataclass
 class ColumnType:
-    kind: str                   # INT | FLOAT | DATE | VARCHAR | ARRAY_FLOAT
+    kind: str                 # "INT" | "FLOAT" | "DATE" | "VARCHAR" | "ARRAY_FLOAT"
     length: Optional[int] = None
 
 @dataclass
@@ -11,7 +13,9 @@ class ColumnDef:
     name: str
     type: ColumnType
     is_key: bool = False
-    index: Optional[str] = None  # SEQ | ISAM | BTREE | RTREE | EXTENDIBLE
+    index: Optional[str] = None  # "ISAM" | "BTREE" | "RTREE" | "SEQ" | "EXTENDIBLE"
+
+# Planes
 
 @dataclass
 class CreateTablePlan:
@@ -21,9 +25,9 @@ class CreateTablePlan:
 @dataclass
 class LoadFromCSVPlan:
     table: str
-    path: str
-    index_kind: str
-    index_key: Union[str, Tuple[str, str]]  # 'id' o ('lat','lng')
+    filepath: str
+    index_kind: str           # por ejemplo: "ISAM"
+    index_cols: List[str]     # por ejemplo: ["id"] o ["(id","nombre)"] ya normalizados a ["id","nombre"]
 
 @dataclass
 class PredicateEq:
@@ -33,38 +37,38 @@ class PredicateEq:
 @dataclass
 class PredicateBetween:
     column: str
-    low: Any
-    high: Any
+    lo: Any
+    hi: Any
 
 @dataclass
-class PredicateSpatialIn:
+class PredicateInPointRadius:
     column: str
-    x: float
-    y: float
-    radius: Optional[float] = None   # usado en búsquedas por rango espacial (point, radio)
+    point: Tuple[float, float]
+    radius: float
 
 @dataclass
 class PredicateKNN:
     column: str
-    x: float
-    y: float
-    k: int                           # número de vecinos más cercanos
-
-# Union de todos los predicados posibles
-Where = Union[PredicateEq, PredicateBetween, PredicateSpatialIn, PredicateKNN]
+    point: Tuple[float, float]
+    k: int
 
 @dataclass
 class SelectPlan:
     table: str
-    columns: Optional[List[str]]     # None => SELECT *
-    where: Optional[Where] = None
+    columns: Optional[List[str]]
+    where: Optional[Any]
 
 @dataclass
 class InsertPlan:
     table: str
+    columns: Optional[List[str]]
     values: List[Any]
 
 @dataclass
 class DeletePlan:
     table: str
-    where: Where
+    where: Any
+
+@dataclass
+class ExplainPlan:
+    inner: Any

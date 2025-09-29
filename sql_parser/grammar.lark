@@ -1,50 +1,62 @@
-?start: stmt ";"+
-      | stmt
+start: stmt (";" stmt)* ";"?
 
-
-?stmt: create_table
+?stmt: explain_stmt
+     | create_table
      | create_from_file
      | select_stmt
      | insert_stmt
      | delete_stmt
 
+explain_stmt: "EXPLAIN" ["ANALYZE"] select_stmt  -> explain_select
+
+# ===== CREATE TABLE =====
+KEY: "KEY"
 create_table: "CREATE" "TABLE" IDENT "(" coldef ("," coldef)* ")"
-coldef: IDENT type_spec ["KEY"] ["INDEX" index_kind]
+coldef: IDENT type_spec [KEY] ["INDEX" index_kind]
 
-type_spec: "INT"        -> t_int
-         | "FLOAT"      -> t_float
-         | "DATE"       -> t_date
-         | "VARCHAR" "[" INT "]" -> t_varchar
-         | "ARRAY" "[" "FLOAT" "]" -> t_array
+type_spec: "INT"                               -> t_int
+         | "FLOAT"                             -> t_float
+         | "DATE"                              -> t_date
+         | "VARCHAR" "[" SIGNED_INT "]"        -> t_varchar
+         | "ARRAY" "[" "FLOAT" "]"             -> t_array
 
-index_kind: "SEQ" | "ISAM" | "BTREE" | "RTREE" | "EXTENDIBLE"
+INDEX_KIND: "SEQ" | "ISAM" | "BTREE" | "RTREE" | "EXTENDIBLE"
+index_kind: INDEX_KIND
+ident_or_string: IDENT | STRING
 
-create_from_file: "CREATE" "TABLE" IDENT "FROM" "FILE" STRING "USING" "INDEX" index_kind "(" (IDENT | "(" IDENT "," IDENT ")") ")"
+# ===== CREATE FROM FILE =====
+# Usamos STRING (ESCAPED_STRING) en una sola línea para evitar ambigüedades
+create_from_file: "CREATE" "TABLE" IDENT "FROM" "FILE" STRING "USING" "INDEX" index_kind "(" (ident_or_string | "(" ident_or_string "," ident_or_string ")") ")"
 
-select_stmt: "SELECT" "*" "FROM" IDENT ["WHERE" predicate]
+# ===== SELECT =====
+select_all: "*"
+select_cols: col_list
+select_stmt: "SELECT" (select_all | select_cols) "FROM" IDENT ["WHERE" predicate]
 
-?predicate: IDENT "=" literal                   -> pred_eq
-          | IDENT "BETWEEN" literal "AND" literal -> pred_between
-          | IDENT "IN" "(" point "," number ")"    -> pred_in
-          | IDENT "NEAREST" "(" point "," INT ")"  -> pred_nearest
+?predicate: IDENT "=" literal                           -> pred_eq
+          | IDENT "BETWEEN" literal "AND" literal       -> pred_between
+          | IDENT "IN" "(" point "," number ")"         -> pred_in
+          | IDENT "NEAREST" "(" point "," SIGNED_INT ")"-> pred_nearest
 
-insert_stmt: "INSERT" "INTO" IDENT "VALUES" "(" literal ("," literal)* ")"
+# ===== INSERT =====
+insert_stmt: "INSERT" "INTO" IDENT ["(" col_list ")"] "VALUES" "(" literal ("," literal)* ")"
+col_list: IDENT ("," IDENT)*
+
+# ===== DELETE =====
 delete_stmt: "DELETE" "FROM" IDENT "WHERE" predicate
 
+# ===== Básicos =====
 point: "(" number "," number ")"
-number: SIGNED_INT -> int_lit
+number: SIGNED_INT   -> int_lit
       | SIGNED_FLOAT -> float_lit
+
+literal: number
+       | STRING      -> string
+       | "NULL"      -> null
 
 %import common.SIGNED_INT
 %import common.SIGNED_FLOAT
-
-
-literal: number
-       | STRING
-
-%import common.CNAME -> IDENT
-%import common.INT
-%import common.FLOAT
-%import common.ESCAPED_STRING -> STRING
+%import common.CNAME         -> IDENT
+%import common.ESCAPED_STRING-> STRING
 %import common.WS
 %ignore WS
