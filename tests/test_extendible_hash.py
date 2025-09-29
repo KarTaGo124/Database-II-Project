@@ -15,46 +15,53 @@ def test_extendible_hash():
     if os.path.exists(test_dir):
         shutil.rmtree(test_dir)
 
+    # Limpiar cualquier directorio de datos residual
+    data_path = os.path.join("data", "databases", test_dir)
+    if os.path.exists(data_path):
+        shutil.rmtree(data_path)
+
     try:
         db_manager = DatabaseManager(test_dir)
 
-        print("\n1. CREATE TABLE simple...")
-        result = execute_sql(db_manager, "CREATE TABLE test (id INT KEY INDEX ISAM, nombre VARCHAR[50]);")
+        print("\n1. CREATE TABLE...")
+        result = execute_sql(db_manager, "CREATE TABLE productos (id INT KEY INDEX ISAM, nombre VARCHAR[20]);")
         print(f"Resultado: {result}")
 
-        print("\n2. Insertando datos...")
-        result = execute_sql(db_manager, 'INSERT INTO test VALUES (1, "Laptop");')
+        print("\n2. INSERT datos iniciales...")
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (1, "Laptop");')
         print(f"Resultado: {result}")
-        result = execute_sql(db_manager, 'INSERT INTO test VALUES (2, "Mouse");')
-        print(f"Resultado: {result}")
-
-        print("\n3. Creando indice HASH en VARCHAR...")
-        result = execute_sql(db_manager, "CREATE INDEX idx_nombre ON test (nombre) USING HASH;")
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (2, "Mouse");')
         print(f"Resultado: {result}")
 
-        print("\n4. Busqueda por indice HASH...")
-        result = execute_sql(db_manager, 'SELECT * FROM test WHERE nombre = "Mouse";')
+        print("\n3. CREATE INDEX HASH...")
+        result = execute_sql(db_manager, "CREATE INDEX ON productos (nombre) USING HASH;")
         print(f"Resultado: {result}")
 
-        print("\n5. Insertando mas datos...")
-        result = execute_sql(db_manager, 'INSERT INTO test VALUES (3, "Monitor");')
+        print("\n4. SELECT por HASH...")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Mouse";')
         print(f"Resultado: {result}")
 
-        print("\n6. Busqueda en datos nuevos...")
-        result = execute_sql(db_manager, 'SELECT * FROM test WHERE nombre = "Monitor";')
+        print("\n5. INSERT después del índice...")
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (3, "Monitor");')
+        print(f"Resultado: {result}")
+
+        print("\n6. SELECT datos nuevos...")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Monitor";')
         print(f"Resultado: {result}")
 
         print("\n7. DROP INDEX HASH...")
-        result = execute_sql(db_manager, "DROP INDEX idx_nombre;")
+        result = execute_sql(db_manager, "DROP INDEX nombre;")
         print(f"Resultado: {result}")
 
         print("\n8. Verificando archivos generados...")
+        full_path = os.path.join("data", "databases", test_dir)
         files = []
-        for root, dirs, filenames in os.walk(test_dir):
-            for filename in filenames:
-                if filename.endswith(('.dat', '.dir', '.bkt')):
-                    rel_path = os.path.relpath(os.path.join(root, filename), test_dir)
-                    files.append(rel_path)
+        if os.path.exists(full_path):
+            for root, dirs, filenames in os.walk(full_path):
+                for filename in filenames:
+                    if filename.endswith(('.dat', '.dir', '.bkt')):
+                        rel_path = os.path.relpath(os.path.join(root, filename), full_path)
+                        files.append(rel_path)
         files.sort()
         print(f"Archivos generados: {files}")
 
