@@ -543,19 +543,10 @@ class ISAMSecondaryBase:
         for file_path in files_to_remove:
             if os.path.exists(file_path):
                 try:
-                    import gc
-                    gc.collect()
-
                     os.remove(file_path)
                     removed_files.append(file_path)
-                except OSError as e:
-                    try:
-                        import time
-                        time.sleep(0.01)
-                        os.remove(file_path)
-                        removed_files.append(file_path)
-                    except OSError:
-                        pass
+                except OSError:
+                    pass
 
         return removed_files
 
