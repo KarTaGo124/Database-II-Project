@@ -157,6 +157,8 @@ class ExtendibleHashing:
 
         self.bucketfile.seek(new_pos)
         self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, local_depth, 0, 0, -1))
+        tombstone = b'\x00' * self.index_record_size
+        self.bucketfile.write(tombstone * BLOCK_FACTOR) #write size of bucket so new pos will get it right when appending another bucket
         return new_pos
 
     def search(self, key):

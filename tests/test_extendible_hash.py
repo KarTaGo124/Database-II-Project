@@ -3,19 +3,20 @@
 import os
 import shutil
 import sys
+
 sys.path.append('.')
 
 from sql_parser.interface import execute_sql
 from indexes.core.database_manager import DatabaseManager
 
-def test_extendible_hash():
-    print("=== Test de Extendible Hash ===")
+
+def test_extendible_hash_simple():
+    print("=== Simple Extendible Hash Test ===")
 
     test_dir = "test_extendible_hash"
     if os.path.exists(test_dir):
         shutil.rmtree(test_dir)
 
-    # Limpiar cualquier directorio de datos residual
     data_path = os.path.join("data", "databases", test_dir)
     if os.path.exists(data_path):
         shutil.rmtree(data_path)
@@ -23,62 +24,89 @@ def test_extendible_hash():
     try:
         db_manager = DatabaseManager(test_dir)
 
-        print("\n1. CREATE TABLE...")
+        print("\n=== STEP 1: CREATE TABLE ===")
         result = execute_sql(db_manager, "CREATE TABLE productos (id INT KEY INDEX ISAM, nombre VARCHAR[20]);")
-        print(f"Resultado: {result}")
+        print(f"Result: {result}")
 
-        print("\n2. INSERT datos iniciales...")
-        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (1, "Laptop");')
-        print(f"Resultado: {result}")
-        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (2, "Mouse");')
-        print(f"Resultado: {result}")
-
-        print("\n3. CREATE INDEX HASH...")
+        print("\n=== STEP 2: CREATE HASH INDEX ===")
         result = execute_sql(db_manager, "CREATE INDEX ON productos (nombre) USING HASH;")
-        print(f"Resultado: {result}")
+        print(f"Result: {result}")
 
-        print("\n4. SELECT por HASH...")
+        print("\n=== STEP 3: INSERT 3 RECORDS ===")
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (1, "Laptop");')
+        print(f"Insert Laptop (id=1): {result}")
+
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (2, "Mouse");')
+        print(f"Insert Mouse (id=2): {result}")
+
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (3, "Keyboard");')
+        print(f"Insert Keyboard (id=3): {result}")
+
+        print("\n=== STEP 4: SEARCH EACH RECORD ===")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Laptop";')
+        print(f"Search Laptop: {result}")
+
         result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Mouse";')
-        print(f"Resultado: {result}")
+        print(f"Search Mouse: {result}")
 
-        print("\n5. INSERT después del índice...")
-        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (3, "Monitor");')
-        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (4, "Monitor");')
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Keyboard";')
+        print(f"Search Keyboard: {result}")
+
+        print("\n=== STEP 5: DELETE ONE RECORD ===")
+        result = execute_sql(db_manager, 'DELETE FROM productos WHERE nombre = "Mouse";')
+        print(f"Delete Mouse: {result}")
+
+        print("\n=== STEP 6: VERIFY DELETION ===")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Mouse";')
+        print(f"Search Mouse (should be empty): {result}")
+
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Laptop";')
+        print(f"Search Laptop (should still exist): {result}")
+
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Keyboard";')
+        print(f"Search Keyboard (should still exist): {result}")
+
+        print("\n=== STEP 7: INSERT DUPLICATE KEY ===")
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (4, "Laptop");')
+        print(f"Insert another Laptop (id=4): {result}")
+
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Laptop";')
+        print(f"Search Laptop (should return 2 records): {result}")
+
+        print("\n=== STEP 8: DELETE ALL LAPTOPS ===")
+        result = execute_sql(db_manager, 'DELETE FROM productos WHERE nombre = "Laptop";')
+        print(f"Delete all Laptops: {result}")
+
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Laptop";')
+        print(f"Search Laptop (should be empty): {result}")
+
+        print("\n=== STEP 9: INSERT INTO DELETED SLOT ===")
         result = execute_sql(db_manager, 'INSERT INTO productos VALUES (5, "Monitor");')
-        print(f"Resultado: {result}")
+        print(f"Insert Monitor (id=5): {result}")
 
-        print("\n ELIMINAR WHERE NOMMBRE == MONITOR")
-        result = execute_sql(db_manager, 'DELETE FROM productos WHERE nombre = "Monitor";')
-        print(f"Resultado: {result}")
-
-        print("\n6. SELECT datos eliminados...")
         result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Monitor";')
-        print(f"Resultado: {result}")
+        print(f"Search Monitor: {result}")
 
-        print("\n 7. SELECT datos vivos")
-        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Mouse";')
-        print(f"Resultado: {result}")
+        print("\n=== STEP 10: SCAN ALL REMAINING ===")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Keyboard";')
+        print(f"Keyboard: {result}")
 
-        print("\n7. DROP INDEX HASH...")
-        result = execute_sql(db_manager, "DROP INDEX nombre;")
-        print(f"Resultado: {result}")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Monitor";')
+        print(f"Monitor: {result}")
 
-        print("\n8. Verificando archivos generados...")
+        print("\n=== STEP 11: CHECK FILES ===")
         full_path = os.path.join("data", "databases", test_dir)
-        files = []
         if os.path.exists(full_path):
             for root, dirs, filenames in os.walk(full_path):
                 for filename in filenames:
-                    if filename.endswith(('.dat', '.dir', '.bkt')):
-                        rel_path = os.path.relpath(os.path.join(root, filename), full_path)
-                        files.append(rel_path)
-        files.sort()
-        print(f"Archivos generados: {files}")
+                    filepath = os.path.join(root, filename)
+                    size = os.path.getsize(filepath)
+                    print(f"  {filename}: {size} bytes")
 
-        print("\n[OK] Test de Extendible Hash completado exitosamente!")
+        print("\n✓ Test completed successfully!")
 
     except Exception as e:
-        print(f"\n[ERROR] Error en el test: {e}")
+        print(f"\n✗ ERROR: {e}")
         import traceback
         traceback.print_exc()
 
@@ -86,5 +114,6 @@ def test_extendible_hash():
         if os.path.exists(test_dir):
             shutil.rmtree(test_dir)
 
+
 if __name__ == "__main__":
-    test_extendible_hash()
+    test_extendible_hash_simple()
