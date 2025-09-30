@@ -36,10 +36,21 @@ class DatabaseManager:
             "csv_filename": csv_filename
         }
 
-        table_info["primary_index"] = self._create_primary_index(
+        primary_index = self._create_primary_index(
             table, primary_index_type, csv_filename
         )
 
+        if primary_index_type == "SEQUENTIAL":
+            extra_fields = {"active": ("BOOL", 1)}
+            table_with_active = Table(
+                table_name=table.table_name,
+                sql_fields=table.sql_fields,
+                key_field=table.key_field,
+                extra_fields=extra_fields
+            )
+            table_info["table"] = table_with_active
+
+        table_info["primary_index"] = primary_index
         self.tables[table_name] = table_info
         return True
 
@@ -556,4 +567,5 @@ class DatabaseManager:
             print(f"  Disk accesses: {result.total_disk_accesses} (R:{result.disk_reads}, W:{result.disk_writes})")
         else:
             print(f"{operation_name} completed (no metrics available)")
+
 
