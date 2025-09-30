@@ -3,6 +3,8 @@ from typing import Dict, Any, List, Tuple, Optional
 from .record import Table, Record
 from .performance_tracker import OperationResult, PerformanceTracker
 
+from indexes.bplus_tree.BTreePrimaryIndex import BTreePrimaryIndex
+from indexes.bplus_tree.BTreeSecondaryIndex import BTreeSecondaryIndex
 
 class DatabaseManager:
 
@@ -486,10 +488,14 @@ class DatabaseManager:
                 key_field=table.key_field,
                 extra_fields=extra_fields
             )
-
             return SequentialFile(main_filename, aux_filename, table_with_active)
+
         elif index_type == "BTREE":
-            raise NotImplementedError(f"B+Tree index not implemented yet")
+            primary_dir = os.path.join(self.base_dir, "primary")
+            os.makedirs(primary_dir, exist_ok=True)
+            primary_filename = os.path.join(primary_dir, "btree_primary.pkl")
+            return BTreePrimaryIndex(table, primary_filename, order=4)
+
 
         raise NotImplementedError(f"Primary index type {index_type} not implemented yet")
 
@@ -515,7 +521,14 @@ class DatabaseManager:
             else:
                 raise NotImplementedError(f"ISAM secondary index para tipo {field_type} no implementado")
         elif index_type == "BTREE":
-            raise NotImplementedError(f"B+Tree secondary index not implemented yet")
+            secondary_dir = os.path.join(self.base_dir, "secondary")
+            os.makedirs(secondary_dir, exist_ok=True)
+            
+            table_info = self.tables[table.table_name]
+            primary_index = table_info["primary_index"]
+            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_btree.pkl")
+            
+            return BTreeSecondaryIndex(field_name, primary_index, filename, order=4)
         elif index_type == "HASH":
             from ..extendible_hashing.extendible_hashing import ExtendibleHashing
 
