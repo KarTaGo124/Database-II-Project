@@ -36,14 +36,25 @@ class DatabaseManager:
             "csv_filename": csv_filename
         }
 
-        table_info["primary_index"] = self._create_primary_index(
+        primary_index = self._create_primary_index(
             table, primary_index_type, csv_filename
         )
 
+        if primary_index_type == "SEQUENTIAL":
+            extra_fields = {"active": ("BOOL", 1)}
+            table_with_active = Table(
+                table_name=table.table_name,
+                sql_fields=table.sql_fields,
+                key_field=table.key_field,
+                extra_fields=extra_fields
+            )
+            table_info["table"] = table_with_active
+
+        table_info["primary_index"] = primary_index
         self.tables[table_name] = table_info
         return True
 
-    def create_index(self, table_name: str, field_name: str, index_type: str):
+    def create_index(self, table_name: str, field_name: str, index_type: str, scan_existing: bool = True):
         if table_name not in self.tables:
             raise ValueError(f"Table {table_name} does not exist")
 
@@ -52,6 +63,9 @@ class DatabaseManager:
 
         table_info = self.tables[table_name]
         table = table_info["table"]
+
+        if field_name == table.key_field:
+            raise ValueError(f"Cannot create secondary index on primary key field '{field_name}'")
 
         field_info = self._get_field_info(table, field_name)
         if not field_info:
@@ -68,6 +82,19 @@ class DatabaseManager:
             "index": secondary_index,
             "type": index_type
         }
+
+        if scan_existing:
+            primary_index = table_info["primary_index"]
+            if hasattr(primary_index, 'scanAll'):
+                try:
+                    existing_records = primary_index.scanAll()
+                    for record in existing_records:
+                        secondary_index.insert(record)
+                except Exception as e:
+                    del table_info["secondary_indexes"][field_name]
+                    if hasattr(secondary_index, 'drop_index'):
+                        secondary_index.drop_index()
+                    raise ValueError(f"Error indexing existing records: {e}")
 
         return True
 
@@ -101,11 +128,34 @@ class DatabaseManager:
 
         if field_name is None:
             primary_index = table_info["primary_index"]
-            return primary_index.search(value)
+            result = primary_index.search(value)
+            if result.data:
+                return OperationResult([result.data], result.execution_time_ms, result.disk_reads, result.disk_writes)
+            else:
+                return OperationResult([], result.execution_time_ms, result.disk_reads, result.disk_writes)
 
         elif field_name in table_info["secondary_indexes"]:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
-            return secondary_index.search(value)
+            primary_index = table_info["primary_index"]
+
+            secondary_result = secondary_index.search(value)
+            if not secondary_result.data:
+                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
+
+            total_reads = secondary_result.disk_reads
+            total_writes = secondary_result.disk_writes
+            total_time = secondary_result.execution_time_ms
+
+            if secondary_result.data:
+                matching_records = []
+                for primary_key in secondary_result.data:
+                    primary_result = primary_index.search_without_metrics(primary_key)
+                    if primary_result:
+                        matching_records.append(primary_result)
+            else:
+                matching_records = []
+
+            return OperationResult(matching_records, total_time, total_reads, total_writes)
 
         else:
             table = table_info["table"]
@@ -113,15 +163,12 @@ class DatabaseManager:
             if not field_info:
                 raise ValueError(f"Field {field_name} not found in table {table_name}")
 
-            performance = PerformanceTracker()
-            performance.start_operation()
-
             primary_index = table_info["primary_index"]
 
             if hasattr(primary_index, 'scanAll'):
+                primary_index.performance.start_operation()
                 all_records = primary_index.scanAll()
-                for _ in all_records:
-                    performance.track_read()
+                scan_result = primary_index.performance.end_operation(all_records)
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
@@ -130,12 +177,16 @@ class DatabaseManager:
                 record_value = getattr(record, field_name, None)
                 if record_value is not None:
                     if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode().strip()
+                        record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
+                    else:
+                        record_value = str(record_value).rstrip()
 
-                    if record_value == value:
+                    value_str = value.decode('utf-8').rstrip('\x00').rstrip() if hasattr(value, 'decode') else str(value).rstrip()
+
+                    if record_value == value_str:
                         matching_records.append(record)
 
-            return performance.end_operation(matching_records)
+            return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
 
     def range_search(self, table_name: str, start_key, end_key, field_name: str = None):
         if table_name not in self.tables:
@@ -149,7 +200,26 @@ class DatabaseManager:
 
         elif field_name in table_info["secondary_indexes"]:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
-            return secondary_index.range_search(start_key, end_key)
+            primary_index = table_info["primary_index"]
+
+            secondary_result = secondary_index.range_search(start_key, end_key)
+            if not secondary_result.data:
+                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
+
+            total_reads = secondary_result.disk_reads
+            total_writes = secondary_result.disk_writes
+            total_time = secondary_result.execution_time_ms
+
+            if secondary_result.data:
+                matching_records = []
+                for primary_key in secondary_result.data:
+                    primary_result = primary_index.search_without_metrics(primary_key)
+                    if primary_result:
+                        matching_records.append(primary_result)
+            else:
+                matching_records = []
+
+            return OperationResult(matching_records, total_time, total_reads, total_writes)
 
         else:
             table = table_info["table"]
@@ -157,34 +227,63 @@ class DatabaseManager:
             if not field_info:
                 raise ValueError(f"Field {field_name} not found in table {table_name}")
 
-            performance = PerformanceTracker()
-            performance.start_operation()
-
             primary_index = table_info["primary_index"]
 
             if hasattr(primary_index, 'scanAll'):
+                primary_index.performance.start_operation()
                 all_records = primary_index.scanAll()
-                for _ in all_records:
-                    performance.track_read()
+                scan_result = primary_index.performance.end_operation(all_records)
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
             matching_records = []
+            field_type, _ = field_info
+
             for record in all_records:
                 record_value = getattr(record, field_name, None)
                 if record_value is not None:
-                    if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode().strip()
+                    # Manejar tipos de datos apropiadamente
+                    if field_type == "FLOAT":
+                        # Para FLOAT, comparar como números
+                        try:
+                            if hasattr(record_value, 'decode'):
+                                record_value = float(record_value.decode('utf-8').rstrip('\x00'))
+                            else:
+                                record_value = float(record_value)
+                            start_val = float(start_key)
+                            end_val = float(end_key)
+                            if start_val <= record_value <= end_val:
+                                matching_records.append(record)
+                        except (ValueError, TypeError):
+                            continue
+                    elif field_type == "INT":
+                        # Para INT, comparar como enteros
+                        try:
+                            if hasattr(record_value, 'decode'):
+                                record_value = int(record_value.decode('utf-8').rstrip('\x00'))
+                            else:
+                                record_value = int(record_value)
+                            start_val = int(start_key)
+                            end_val = int(end_key)
+                            if start_val <= record_value <= end_val:
+                                matching_records.append(record)
+                        except (ValueError, TypeError):
+                            continue
+                    else:
+                        # Para strings/otros tipos, comparar como strings
+                        if hasattr(record_value, 'decode'):
+                            record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
+                        else:
+                            record_value = str(record_value).rstrip()
 
-                    try:
-                        if start_key <= record_value <= end_key:
-                            matching_records.append(record)
-                    except TypeError:
-                        if str(start_key) <= str(record_value) <= str(end_key):
+                        start_str = start_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(start_key, 'decode') else str(start_key).rstrip()
+                        end_str = end_key.decode('utf-8').rstrip('\x00').rstrip() if hasattr(end_key, 'decode') else str(end_key).rstrip()
+
+                        if start_str <= record_value <= end_str:
                             matching_records.append(record)
 
             matching_records.sort(key=lambda r: getattr(r, field_name))
-            return performance.end_operation(matching_records)
+            return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
 
     def delete(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
@@ -195,11 +294,11 @@ class DatabaseManager:
         if field_name is None:
             primary_index = table_info["primary_index"]
 
-            search_result = primary_index.search(value)
-            if search_result.data is None:
+            search_result = self.search(table_name, value)
+            if not search_result.data:
                 return OperationResult(False, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
 
-            record = search_result.data
+            record = search_result.data[0]
             total_reads = search_result.disk_reads
             total_writes = search_result.disk_writes
             total_time = search_result.execution_time_ms
@@ -229,7 +328,7 @@ class DatabaseManager:
             total_writes = search_result.disk_writes
             total_time = search_result.execution_time_ms
 
-            records_to_delete = search_result.data if isinstance(search_result.data, list) else [search_result.data]
+            records_to_delete = search_result.data
 
             for record in records_to_delete:
                 delete_result = self.delete(table_name, record.get_key())
@@ -272,7 +371,7 @@ class DatabaseManager:
         table_info = self.tables[table_name]
 
         if field_name not in table_info["secondary_indexes"]:
-            return False
+            raise ValueError(f"Index on field '{field_name}' not found in table '{table_name}'")
 
         secondary_index = table_info["secondary_indexes"][field_name]["index"]
 
@@ -398,19 +497,34 @@ class DatabaseManager:
         field_type, field_size = self._get_field_info(table, field_name)
 
         if index_type == "ISAM":
-            from ..isam.secondary import create_secondary_index
+            from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR, ISAMSecondaryIndexFLOAT
 
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
-            secondary_filename = os.path.join(secondary_dir, f"{field_name}_secondary.dat")
 
-            primary_index = self.tables[table.table_name]["primary_index"]
-            return create_secondary_index(field_name, field_type, field_size, primary_index, secondary_filename)
+            table_info = self.tables[table.table_name]
+            primary_index = table_info["primary_index"]
+            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_isam.dat")
 
+            if field_type == "INT":
+                return ISAMSecondaryIndexINT(field_name, primary_index, filename)
+            elif field_type == "CHAR":
+                return ISAMSecondaryIndexCHAR(field_name, field_size, primary_index, filename)
+            elif field_type == "FLOAT":
+                return ISAMSecondaryIndexFLOAT(field_name, primary_index, filename)
+            else:
+                raise NotImplementedError(f"ISAM secondary index para tipo {field_type} no implementado")
         elif index_type == "BTREE":
             raise NotImplementedError(f"B+Tree secondary index not implemented yet")
         elif index_type == "HASH":
-            raise NotImplementedError(f"Hash secondary index not implemented yet")
+            from ..extendible_hashing.extendible_hashing import ExtendibleHashing
+
+            secondary_dir = os.path.join(self.base_dir, "secondary")
+            os.makedirs(secondary_dir, exist_ok=True)
+
+            data_filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}")
+
+            return ExtendibleHashing(data_filename, field_name, field_type, field_size, is_primary=False)
         elif index_type == "RTREE":
             raise NotImplementedError(f"R-Tree secondary index not implemented yet")
 
@@ -453,4 +567,5 @@ class DatabaseManager:
             print(f"  Disk accesses: {result.total_disk_accesses} (R:{result.disk_reads}, W:{result.disk_writes})")
         else:
             print(f"{operation_name} completed (no metrics available)")
+
 

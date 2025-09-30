@@ -40,6 +40,8 @@ Thumbs.db
 *.dat
 *.db
 *.sqlite
+*.bkt
+*.dir
 
 # Temporary files
 *.tmp
