@@ -2,6 +2,7 @@ from typing import Any, List, Optional, Tuple, Union
 import bisect
 import pickle
 import os
+from ..core.record import Record
 
 
 class Node:
@@ -97,7 +98,7 @@ class BPlusTreeClusteredIndex:
         leaf.records.pop(pos)
         
         if leaf != self.root and leaf.is_underflow(self.min_keys):
-            self._handle_leaf_underflow(leaf)
+            self.handle_leaf_underflow(leaf)
         
         # root is empty
         if isinstance(self.root, ClusteredInternalNode) and len(self.root.keys) == 0:
@@ -347,30 +348,6 @@ class BPlusTreeClusteredIndex:
                     self.next_page_id = tree_data['next_page_id']
                     self.root = self.pages[self.root_page_id]
                     
-                    first_leaf_id = tree_data.get('first_leaf_id')
-                    if first_leaf_id is not None and first_leaf_id in self.pages:
-                        self.first_leaf = self.pages[first_leaf_id]
-                    else:
-                        current = self.root
-                        while isinstance(current, ClusteredInternalNode):
-                            if current.children:
-                                current = current.children[0]
-                            else:
-                                break
-                        self.first_leaf = current if isinstance(current, ClusteredLeafNode) else self.root
-        except Exception as e:
-            print(f"Error loading clustered tree {e}")
-
-    def load_tree(self):
-        try:
-            if os.path.exists(self.file_path):
-                with open(self.file_path, 'rb') as f:
-                    tree_data = pickle.load(f)
-                    self.root_page_id = tree_data['root_page_id']
-                    self.pages = tree_data['pages']
-                    self.next_page_id = tree_data['next_page_id']
-                    self.root = self.pages[self.root_page_id]
-                    
                     # first_leaf pointer
                     first_leaf_id = tree_data.get('first_leaf_id')
                     if first_leaf_id is not None and first_leaf_id in self.pages:
@@ -386,3 +363,15 @@ class BPlusTreeClusteredIndex:
                         self.first_leaf = current if isinstance(current, ClusteredLeafNode) else self.root
         except Exception as e:
             print(f"Error loading clustered tree {e}")
+
+    def info_btree_clustered(self):
+        """Devuelve estadísticas básicas del árbol clustered."""
+        stats = {
+            "order": self.order,
+            "max_keys": self.max_keys,
+            "min_keys": self.min_keys,
+            "total_pages": len(self.pages),
+            "root_page_id": self.root_page_id,
+        }
+        # Puedes agregar más estadísticas si lo deseas
+        return stats
