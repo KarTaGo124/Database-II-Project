@@ -6,7 +6,6 @@ from ..core.performance_tracker import PerformanceTracker, OperationResult
 
 BLOCK_FACTOR = 8
 MAX_OVERFLOW = 2
-MIN_SIZE = 4
 
 
 class Bucket:
@@ -278,9 +277,6 @@ class ExtendibleHashing:
         # Re-distribute all records
         for packed_rec in all_records_packed:
             unpacked = Record.unpack(packed_rec, self.index_record_template.value_type_size, "index_value")
-            key = unpacked.index_value
-            if isinstance(key, bytes):
-                key = key.decode('utf-8').strip('\x00')
             self.insert(unpacked)
 
     def _read_header(self):

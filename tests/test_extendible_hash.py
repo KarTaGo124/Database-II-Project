@@ -43,10 +43,20 @@ def test_extendible_hash():
 
         print("\n5. INSERT después del índice...")
         result = execute_sql(db_manager, 'INSERT INTO productos VALUES (3, "Monitor");')
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (4, "Monitor");')
+        result = execute_sql(db_manager, 'INSERT INTO productos VALUES (5, "Monitor");')
         print(f"Resultado: {result}")
 
-        print("\n6. SELECT datos nuevos...")
+        print("\n ELIMINAR WHERE NOMMBRE == MONITOR")
+        result = execute_sql(db_manager, 'DELETE FROM productos WHERE nombre = "Monitor";')
+        print(f"Resultado: {result}")
+
+        print("\n6. SELECT datos eliminados...")
         result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Monitor";')
+        print(f"Resultado: {result}")
+
+        print("\n 7. SELECT datos vivos")
+        result = execute_sql(db_manager, 'SELECT * FROM productos WHERE nombre = "Mouse";')
         print(f"Resultado: {result}")
 
         print("\n7. DROP INDEX HASH...")
