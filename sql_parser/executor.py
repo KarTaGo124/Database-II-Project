@@ -376,7 +376,10 @@ class Executor:
             for (name, ftype, _), val in zip(phys_fields, padded):
                 v = val
                 if v is None:
-                    v = self._defaults_for_field(ftype)
+                    if name == "active" and self.db.tables[plan.table]["primary_type"] == "SEQUENTIAL":
+                        v = True
+                    else:
+                        v = self._defaults_for_field(ftype)
                 if name == "fecha" and isinstance(v, str):
                     v = self._cast_date_ddmmyyyy_to_iso(v)
                 if ftype == "INT" and v is not None:
