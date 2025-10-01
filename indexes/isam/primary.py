@@ -924,30 +924,6 @@ class ISAMPrimaryIndex:
             else:
                 return self._search_in_page_chain_no_tracking(data_file, target_data_page_num, key_value)
 
-    def batch_search(self, key_list):
-        self.performance.start_operation()
-        results = []
-
-        if not os.path.exists(self.filename):
-            return self.performance.end_operation(results)
-
-        with open(self.root_index_file, "rb") as root_file, \
-             open(self.leaf_index_file, "rb") as leaf_file, \
-             open(self.filename, "rb") as data_file:
-
-            for key_value in key_list:
-                root_index = self._read_root_index(root_file, 0)
-                target_leaf_page_num = root_index.find_leaf_page_for_key(key_value)
-
-                leaf_index = self._read_leaf_index(leaf_file, target_leaf_page_num)
-                target_data_page_num = leaf_index.find_data_page_for_key(key_value)
-
-                result = self._search_in_page_chain(data_file, target_data_page_num, key_value)
-                if result:
-                    results.append(result)
-
-        return self.performance.end_operation(results)
-
     def delete(self, key_value):
         self.performance.start_operation()
 
