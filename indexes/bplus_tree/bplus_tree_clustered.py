@@ -56,7 +56,7 @@ class BPlusTreeClusteredIndex:
         # for existing b+tree
         self.load_tree()
     
-    def _load_page(self, page_id: int) -> Node:
+    def load_page(self, page_id: int) -> Node:
         """Load a page from disk with performance tracking - NO CACHE"""
         # Track disk read EVERY TIME
         self.performance.track_read()
@@ -93,7 +93,7 @@ class BPlusTreeClusteredIndex:
         if self.search(key) is not None:
             return False  
             
-        self.insert_recursive(self._load_page(self.root_page_id), key, record)
+        self.insert_recursive(self.load_page(self.root_page_id), key, record)
         self.save_tree()
         return True
 
@@ -111,7 +111,7 @@ class BPlusTreeClusteredIndex:
         else:
             pos = bisect.bisect_right(node.keys, key)
             child_id = node.children[pos].id if hasattr(node.children[pos], 'id') else pos
-            child = self._load_page(child_id)
+            child = self.load_page(child_id)
             self.insert_recursive(child, key, record)
             
             if child.is_full(self.max_keys):
@@ -433,11 +433,11 @@ class BPlusTreeClusteredIndex:
                 self.split_internal(parent)
                 
     def find_leaf_node(self, key: Any) -> ClusteredLeafNode:
-        current = self._load_page(self.root_page_id)
+        current = self.load_page(self.root_page_id)
         while isinstance(current, ClusteredInternalNode):
             pos = bisect.bisect_right(current.keys, key)
             child_id = current.children[pos].id if hasattr(current.children[pos], 'id') else pos
-            current = self._load_page(child_id)
+            current = self.load_page(child_id)
         return current
 
     def get_key_value(self, record: Record) -> Any:
@@ -459,7 +459,7 @@ class BPlusTreeClusteredIndex:
             
             # Load next leaf from disk
             next_leaf_id = leaf.next.id if leaf.next and hasattr(leaf.next, 'id') else None
-            leaf = self._load_page(next_leaf_id) if next_leaf_id else None
+            leaf = self.load_page(next_leaf_id) if next_leaf_id else None
             pos = 0
         
         return results

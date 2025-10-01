@@ -74,7 +74,7 @@ class BPlusTreeUnclusteredIndex:
         # load bplustree if it exists
         self.load_tree()
         
-    def _load_page(self, page_id: int) -> Node:
+    def load_page(self, page_id: int) -> Node:
         """Load a page from disk with performance tracking - NO CACHE"""
         # Track disk read EVERY TIME
         self.performance.track_read()
@@ -113,7 +113,7 @@ class BPlusTreeUnclusteredIndex:
         if self.search(key) is not None:
             return False 
             
-        self.insert_recursive(self._load_page(self.root_page_id), key, record_pointer)
+        self.insert_recursive(self.load_page(self.root_page_id), key, record_pointer)
         self.save_tree()
         return True
 
@@ -134,7 +134,7 @@ class BPlusTreeUnclusteredIndex:
             # correct child
             pos = bisect.bisect_right(node.keys, key)
             child_id = node.children[pos].id if hasattr(node.children[pos], 'id') else pos
-            child = self._load_page(child_id)
+            child = self.load_page(child_id)
             self.insert_recursive(child, key, record_pointer)
             
             # split if is full
@@ -488,11 +488,11 @@ class BPlusTreeUnclusteredIndex:
                 self.split_internal(parent)
 
     def find_leaf_node(self, key: Any) -> LeafNode:
-        current = self._load_page(self.root_page_id)
+        current = self.load_page(self.root_page_id)
         while isinstance(current, InternalNode):
             pos = bisect.bisect_right(current.keys, key)
             child_id = current.children[pos].id if hasattr(current.children[pos], 'id') else pos
-            current = self._load_page(child_id)
+            current = self.load_page(child_id)
         return current
 
     def get_key_value(self, record) -> Any:
