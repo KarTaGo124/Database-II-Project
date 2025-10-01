@@ -54,10 +54,20 @@ class RTree:
 
     #def rangeSearch (con el point, k)
 
-    #def rangeSearch (begin-key, end-key)
+    #def rangeSearch (begin-key, end-key) va?????
 
-    def add():
-        pass
+    def add(self, id_record: int, punto: List[float], record) -> bool:
+        try: 
+            caja = self.punto_a_rectangulo(punto)
+            self.idx.insert(id_record, caja) 
+            self.records[id_record] = { 'id': id_record, 'punto': punto, 'record': record}
+            if self.metadata_file:
+                self.save_metadata()
+            return True
+        except Exception as e:
+            print(f"ERROR AL AÑADIR: {e}")
+            return False
+        
 
     def remove():
         pass
@@ -70,8 +80,17 @@ class RTree:
             suma += (punto1[i] - punto2[i]) ** 2
         return math.sqrt(suma)
 
-    def punto_a_rectangulo():
-        pass
+    def punto_a_rectangulo(self, punto: List[float]) -> Tuple:
+        # el rtree piensa con cajas, no con puntos por ejemplo el punto (3,4) en realidad es la caja (3,4,3,4) y asi
+        if len(punto) != self.dimension:
+            raise ValueError(f"El punto debe tener {self.dimension} dimensiones")
+        return tuple(punto + punto)
 
-    def punto_con_radio():
-        pass
+
+
+        return tuple(min_c + max_c)
+
+    def close(self):
+        if self.metadata_file:
+            self._save_metadata()
+        self.idx.close()
