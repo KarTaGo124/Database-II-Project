@@ -201,8 +201,13 @@ class DatabaseManager:
             return primary_index.range_search(start_key, end_key)
 
         elif field_name in table_info["secondary_indexes"]:
-            secondary_index = table_info["secondary_indexes"][field_name]["index"]
+            secondary_info = table_info["secondary_indexes"][field_name]
+            secondary_index = secondary_info["index"]
+            secondary_type = secondary_info["type"]
             primary_index = table_info["primary_index"]
+
+            if secondary_type == "HASH":
+                raise NotImplementedError(f"Range search is not supported for HASH indexes (secondary index on '{field_name}'). Hash indexes are optimized for exact key lookups only.")
 
             secondary_result = secondary_index.range_search(start_key, end_key)
             if not secondary_result.data:
