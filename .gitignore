@@ -42,6 +42,8 @@ Thumbs.db
 *.sqlite
 *.bkt
 *.dir
+*.pkl
+*.mapping
 
 # Temporary files
 *.tmp
