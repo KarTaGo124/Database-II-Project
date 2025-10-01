@@ -87,7 +87,7 @@ class BPlusTreeUnclusteredIndex:
         
         return None
     
-    def _write_page(self, page_id: int, page: Node):
+    def write_page(self, page_id: int, page: Node):
         """Write a page to disk with performance tracking - NO CACHE"""
         # Track disk write EVERY TIME
         self.performance.track_write()
@@ -125,7 +125,7 @@ class BPlusTreeUnclusteredIndex:
             node.values.insert(pos, record_pointer)
             
             # Write modified page back to disk
-            self._write_page(node.id, node)
+            self.write_page(node.id, node)
             
             # split if is full
             if node.is_full(self.max_keys):
@@ -427,8 +427,8 @@ class BPlusTreeUnclusteredIndex:
         leaf.values = leaf.values[:mid]
         
         new_leaf.id = self.next_page_id
-        self._write_page(self.next_page_id, new_leaf)
-        self._write_page(leaf.id, leaf)  # Write updated original leaf
+        self.write_page(self.next_page_id, new_leaf)
+        self.write_page(leaf.id, leaf)  # Write updated original leaf
         self.next_page_id += 1
         self.next_page_id += 1
         

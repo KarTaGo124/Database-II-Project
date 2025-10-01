@@ -69,7 +69,7 @@ class BPlusTreeClusteredIndex:
         
         return None
     
-    def _write_page(self, page_id: int, page: Node):
+    def write_page(self, page_id: int, page: Node):
         """Write a page to disk with performance tracking - NO CACHE"""
         # Track disk write EVERY TIME
         self.performance.track_write()
@@ -104,7 +104,7 @@ class BPlusTreeClusteredIndex:
             node.records.insert(pos, record)
             
             # Write modified page back to disk
-            self._write_page(node.id, node)
+            self.write_page(node.id, node)
             
             if node.is_full(self.max_keys):
                 self.split_leaf(node)
@@ -132,7 +132,7 @@ class BPlusTreeClusteredIndex:
         leaf.records.pop(pos)
         
         # Write modified page back to disk
-        self._write_page(leaf.id, leaf)
+        self.write_page(leaf.id, leaf)
         
         if leaf != self.root and leaf.is_underflow(self.min_keys):
             self.handle_leaf_underflow(leaf)
@@ -367,7 +367,7 @@ class BPlusTreeClusteredIndex:
         
         # assign page ID to new node and add to pages
         new_leaf.id = self.next_page_id
-        self._write_page(self.next_page_id, new_leaf)
+        self.write_page(self.next_page_id, new_leaf)
         self.next_page_id += 1
         
         # promote the first key of new leaf to parent
@@ -395,7 +395,7 @@ class BPlusTreeClusteredIndex:
         
         # assign page ID to new node and add to pages
         new_internal.id = self.next_page_id
-        self._write_page(self.next_page_id, new_internal)
+        self.write_page(self.next_page_id, new_internal)
         self.next_page_id += 1
         
         # promote middle key to parent
@@ -413,7 +413,7 @@ class BPlusTreeClusteredIndex:
             # update root references
             self.root = new_root
             new_root.id = self.next_page_id
-            self._write_page(self.next_page_id, new_root)
+            self.write_page(self.next_page_id, new_root)
             self.next_page_id += 1
             self.root_page_id = new_root.id
             
@@ -426,7 +426,7 @@ class BPlusTreeClusteredIndex:
             right_child.parent = parent
             
             # Write modified parent back to disk
-            self._write_page(parent.id, parent)
+            self.write_page(parent.id, parent)
             
             # Check if parent is now full
             if parent.is_full(self.max_keys):
