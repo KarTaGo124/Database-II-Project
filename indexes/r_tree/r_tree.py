@@ -34,10 +34,18 @@ class RTree:
         return list(self.records.values())
     
     def load_metadata(self):
-        pass
+        try:
+            with open(self.metadata_file, 'rb') as f:
+                self.records = pickle.load(f) # carga el diccionario
+        except Exception as e:
+            print(f"ERROR AL CARGAR METADATA: {e}")
 
     def save_metadata(self):
-        pass
+        try: 
+            with open(self.metadata_file, 'wb') as f:
+                pickle.dump(self.records, f) # guarda el diccionario de records (literalmente asi se llama el metodo)
+        except Exception as e:
+            print(f"ERROR AL GUARDAR METADATA: {e}")
 
     def search(self, id_record: int) -> Optional[dict]: #optional porque puede que no lo encuentre
         return self.records.get(id_record)
@@ -67,8 +75,3 @@ class RTree:
 
     def punto_con_radio():
         pass
-
-
-    
-
-        
