@@ -125,7 +125,7 @@ class SequentialFile:
     def insert(self, record: Record):
         self.performance.start_operation()
 
-        existing = self.search_without_metrics(record.get_key())
+        existing = self.search_without_metrics(record.get_key(), track_reads=True)
         if existing is not None:
             raise ValueError(f"Record con clave {record.get_key()} ya existe")
 
@@ -142,7 +142,8 @@ class SequentialFile:
 
         return self.performance.end_operation(True)
 
-    def search_without_metrics(self, key):
+
+    def search_without_metrics(self, key, track_reads=False):
         main_size = self.get_file_size(self.main_file)
         if main_size > 0:
             with open(self.main_file, 'rb') as f:
@@ -152,6 +153,8 @@ class SequentialFile:
                     mid = (left + right) // 2
                     f.seek(mid * self.record_size)
                     data = f.read(self.record_size)
+                    if track_reads:
+                        self.performance.track_read()
 
                     if not data:
                         break
@@ -175,6 +178,8 @@ class SequentialFile:
                     data = f.read(self.record_size)
                     if not data:
                         break
+                    if track_reads:
+                        self.performance.track_read()
 
                     rec = Record.unpack(data, self.list_of_types, self.key_field)
 
@@ -297,16 +302,6 @@ class SequentialFile:
 
         return self.performance.end_operation(None)
 
-    def batch_search(self, key_list):
-        self.performance.start_operation()
-        results = []
-
-        for key in key_list:
-            result = self.search_without_metrics(key)
-            if result:
-                results.append(result)
-
-        return self.performance.end_operation(results)
 
     def range_search(self, begin_key, end_key):
         self.performance.start_operation()
