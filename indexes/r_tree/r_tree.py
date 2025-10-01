@@ -54,8 +54,13 @@ class RTree:
     def remove():
         pass
 
-    def distancia_euclidiana():
-        pass
+    def distancia_euclidiana(self, punto1: Tuple[float], punto2: Tuple[float]) -> float:
+        if len(punto1) != len(punto2):
+            raise ValueError("ERROR: LOS PUNTOS NO TIENEN LA MISMA DIMENSION")
+        suma = 0
+        for i in range(len(punto1)):
+            suma += (punto1[i] - punto2[i]) ** 2
+        return math.sqrt(suma)
 
     def punto_a_rectangulo():
         pass
