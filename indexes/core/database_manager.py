@@ -593,9 +593,6 @@ class DatabaseManager:
         table_info = self.tables[table_name]
         primary_index = table_info["primary_index"]
 
-        if hasattr(primary_index, 'scan_all'):
-            return primary_index.scan_all()
-        else:
-            raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
+        return primary_index.scan_all()
 
 

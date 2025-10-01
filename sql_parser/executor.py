@@ -6,6 +6,7 @@ from .plan_types import (
     ColumnDef, ColumnType, PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN
 )
 from indexes.core.record import Table, Record
+from indexes.core.performance_tracker import OperationResult
 
 
 class Executor:
@@ -32,7 +33,6 @@ class Executor:
         else:
             raise NotImplementedError(f"Plan no soportado: {type(plan)}")
 
-    # ====== helpers: tipos ======
     def _col_to_physical(self, c: ColumnDef) -> Optional[Tuple[str, str, int]]:
         name = c.name
         kind = c.type.kind
@@ -74,7 +74,6 @@ class Executor:
         ignored_cols: List[str] = []
         secondary_decls: List[Tuple[str, str]] = []
 
-        # materializar columnas; solo permitir índices sobre columnas materializadas
         materialized = set()
         for c in plan.columns:
             phys = self._col_to_physical(c)
@@ -120,7 +119,8 @@ class Executor:
             if not unsupported:  # declarados pero ninguno pudo crearse
                 unsupported = [f"{c}:{k}" for c, k in secondary_decls]
             msg_parts.append(f"— Índices secundarios no soportados: {', '.join(unsupported)}")
-        return " ".join(msg_parts)
+        result_msg = " ".join(msg_parts)
+        return OperationResult(result_msg, 0, 0, 0)  # CREATE TABLE doesn't involve significant disk I/O in our model
 
     # ====== helpers CSV ======
     def _defaults_for_field(self, ftype: str) -> Any:
@@ -171,7 +171,6 @@ class Executor:
         # simple heurística ; o ,  (prioriza ';' si aparece)
         return ";" if header_line.count(";") >= header_line.count(",") else ","
 
-    #Para evitar errores con el csv que uso de prueba... (Se puede borrar o modificar si se necesita)
     def _spanish_header_mapping(self, headers: List[str]) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
         for h in headers:
@@ -208,14 +207,12 @@ class Executor:
         phys_fields = table_obj.all_fields
         key_field = table_obj.key_field
 
-        # índice rápido de tipos físicos por nombre (lower)
         phys_index: Dict[str, Tuple[str, str, int]] = {
             name.lower(): (name, ftype, fsize) for (name, ftype, fsize) in phys_fields
         }
 
         inserted = duplicates = cast_err = 0
 
-        # Detectar delimitador leyendo primera línea
         with open(plan.filepath, "r", encoding="utf-8", newline="") as fh_probe:
             first_line = fh_probe.readline()
             delimiter = self._guess_delimiter(first_line)
@@ -225,13 +222,10 @@ class Executor:
             if not reader.fieldnames:
                 return "CSV cargado: insertados=0, duplicados=0, cast_err=0"
 
-            # Mapeo de encabezados españoles a nombres físicos
             header_map = self._spanish_header_mapping(reader.fieldnames)
 
             for row in reader:
-                # normalizar claves a minúsculas y limpiar
                 row_lower = {(k or "").strip().lower(): v for k, v in row.items()}
-                # construir record físico
                 rec = Record(phys_fields, key_field)
                 ok_row = True
 
@@ -247,9 +241,7 @@ class Executor:
                                     raw = row_lower[h_sp_lower]
                                     break
 
-                        # casting por tipo
                         if phys_name == "fecha":
-                            # Esperamos DD/MM/YYYY en el dataset de ejemplo
                             raw = self._cast_date_ddmmyyyy_to_iso(str(raw) if raw is not None else "")
 
                         val = self._cast_value(raw, ftype)
@@ -264,7 +256,6 @@ class Executor:
 
                 try:
                     res = self.db.insert(plan.table, rec)
-                    # si insert retorna data=False => duplicado/no insertado
                     if hasattr(res, "data") and (res.data is False):
                         duplicates += 1
                     else:
@@ -306,52 +297,29 @@ class Executor:
         where = plan.where
 
         if where is None:
-            tinfo = self.db.get_table_info(table)
-            if not tinfo:
-                raise ValueError(f"Tabla {table} no existe")
-            primary = self.db.tables[table]["primary_index"]
-            if not hasattr(primary, "scanAll"):
-                raise NotImplementedError(f"El índice primario '{tinfo['primary_type']}' no soporta scanAll()")
-            recs = primary.scanAll()
-            return self._project_records(recs, plan.columns)
+            res = self.db.scan_all(table)
+            projected_data = self._project_records(res.data, plan.columns)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes)
 
         if isinstance(where, PredicateEq):
             col = where.column
             val = where.value
-            target_col = col or self.db.tables[table]["table"].key_field
-            ftype = self._get_ftype(table, target_col)
-            if ftype == "FLOAT":
-                try:
-                    fv = float(val)
-                except Exception:
-                    fv = None
-                if fv is not None:
-                    eps = 1e-3
-                    res = self.db.range_search(table, fv - eps, fv + eps, field_name=col)
-                    data = res.data if hasattr(res, "data") else res
-                    data_list = data if isinstance(data, list) else ([data] if data else [])
-                    return self._project_records(data_list, plan.columns)
 
-            # Camino normal (PK u otra columna)
-            if col is None or col == self.db.tables[table]["table"].key_field:
-                res = self.db.search(table, val)
-            else:
-                res = self.db.search(table, val, field_name=col)
-            data = res.data if hasattr(res, "data") else res
-            data_list = data if isinstance(data, list) else ([data] if data else [])
-            return self._project_records(data_list, plan.columns)
+            res = self.db.search(table, val, field_name=col)
+            data_list = res.data if isinstance(res.data, list) else ([res.data] if res.data else [])
+            projected_data = self._project_records(data_list, plan.columns)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes)
 
         if isinstance(where, PredicateBetween):
             col = where.column
             lo = where.lo
             hi = where.hi
             res = self.db.range_search(table, lo, hi, field_name=col)
-            data = res.data if hasattr(res, "data") else res
-            data_list = data if isinstance(data, list) else ([data] if data else [])
-            return self._project_records(data_list, plan.columns)
+            projected_data = self._project_records(res.data, plan.columns)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes)
 
         if isinstance(where, (PredicateInPointRadius, PredicateKNN)):
-            raise NotImplementedError("Predicados espaciales no soportados aún en el motor físico")
+            raise NotImplementedError("Predicados espaciales no soportados")
 
         raise NotImplementedError("Predicado WHERE no soportado")
 
@@ -403,10 +371,10 @@ class Executor:
                 rec.set_field_value(c, vv)
 
         res = self.db.insert(plan.table, rec)
-        ok = bool(res.data) if hasattr(res, "data") else True
-        return "OK" if ok else "Duplicado/No insertado"
 
-    # ====== DELETE ======
+        success_msg = "OK" if bool(res.data) else "Duplicado/No insertado"
+        return OperationResult(success_msg, res.execution_time_ms, res.disk_reads, res.disk_writes)
+
     def _delete(self, plan: DeletePlan):
         tinfo = self.db.get_table_info(plan.table)
         if not tinfo:
@@ -419,10 +387,10 @@ class Executor:
         if isinstance(where, PredicateEq):
             col = where.column
             val = where.value
-            # si es PK, dejar field_name=None para borrar por primario
             pk_name = self.db.tables[plan.table]["table"].key_field
             res = self.db.delete(plan.table, val, field_name=(None if col == pk_name else col))
-            data = getattr(res, "data", 0)
+
+            data = res.data
             if isinstance(data, bool):
                 deleted = 1 if data else 0
             else:
@@ -430,18 +398,21 @@ class Executor:
                     deleted = int(data)
                 except Exception:
                     deleted = 0
-            return f"OK ({deleted} registros)"
+            result_msg = f"OK ({deleted} registros)"
+            return OperationResult(result_msg, res.execution_time_ms, res.disk_reads, res.disk_writes)
         else:
             col = where.column
             lo = where.lo
             hi = where.hi
             res = self.db.range_delete(plan.table, lo, hi, field_name=col)
-            data = getattr(res, "data", 0)
+
+            data = res.data
             try:
                 deleted = int(data)
             except Exception:
                 deleted = 0
-            return f"OK ({deleted} registros)"
+            result_msg = f"OK ({deleted} registros)"
+            return OperationResult(result_msg, res.execution_time_ms, res.disk_reads, res.disk_writes)
 
     # ====== CREATE INDEX ======
     def _create_index(self, plan: CreateIndexPlan):
@@ -460,7 +431,6 @@ class Executor:
             if plan.table not in self.db.tables:
                 return f"ERROR: Tabla '{plan.table}' no existe"
 
-            # Usar método nativo del DatabaseManager
             removed_files = self.db.drop_table(plan.table)
             files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
 
