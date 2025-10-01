@@ -1128,7 +1128,7 @@ class ISAMPrimaryIndex:
 
         self.show_data_structure()
 
-    def scanAll(self):
+    def scan_all(self):
         results = []
 
         if not os.path.exists(self.filename):

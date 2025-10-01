@@ -350,7 +350,7 @@ class SequentialFile:
         results.sort(key=lambda r: r.get_key())
         return self.performance.end_operation(results)
 
-    def scanAll(self):
+    def scan_all(self):
         return self.show_all_records_from_main_and_aux()
 
     def drop_table(self):

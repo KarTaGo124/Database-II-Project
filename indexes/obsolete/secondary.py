@@ -407,7 +407,7 @@ class ISAMSecondaryBase:
 
     # Funciones extras
 
-    def scanAll(self):
+    def scan_all(self):
         results = []
 
         if not os.path.exists(self.filename):
@@ -460,7 +460,7 @@ class ISAMSecondaryBase:
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-        all_primary_records = self.primary_isam.scanAll()
+        all_primary_records = self.primary_isam.scan_all()
         if all_primary_records:
             for record in all_primary_records:
                 self.add_to_secondary(record)
