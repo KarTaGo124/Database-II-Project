@@ -2,6 +2,8 @@ from typing import Any, List, Optional, Tuple, Union
 import bisect
 import pickle
 import os
+import time
+from ..core.performance_tracker import PerformanceTracker
 
 
 class Node:
@@ -59,7 +61,10 @@ class BPlusTreeUnclusteredIndex:
         self.file_path = file_path
         self.first_leaf = self.root  # Pointer to the first leaf node
         
-        # for pages
+        # Performance tracking
+        self.performance = PerformanceTracker()
+        
+        # for pages - pure disk I/O without cache
         self.pages = {}  # page_id  
         self.next_page_id = 1
         self.root_page_id = 0
@@ -68,6 +73,29 @@ class BPlusTreeUnclusteredIndex:
         
         # load bplustree if it exists
         self.load_tree()
+        
+    def _load_page(self, page_id: int) -> Node:
+        """Load a page from disk with performance tracking - NO CACHE"""
+        # Track disk read EVERY TIME
+        self.performance.track_read()
+        
+        # Simulate disk I/O delay (1ms for realistic testing)
+        time.sleep(0.001)
+        
+        if page_id in self.pages:
+            return self.pages[page_id]
+        
+        return None
+    
+    def _write_page(self, page_id: int, page: Node):
+        """Write a page to disk with performance tracking - NO CACHE"""
+        # Track disk write EVERY TIME
+        self.performance.track_write()
+        
+        # Simulate disk I/O delay
+        time.sleep(0.001)
+        
+        self.pages[page_id] = page
 
     def search(self, key: Any) -> Optional[RecordPointer]:
         leaf_node = self.find_leaf_node(key)
@@ -78,14 +106,14 @@ class BPlusTreeUnclusteredIndex:
             return record_pointer
         return None
 
-    def insert(self, record: 'Record', record_pointer: RecordPointer) -> bool:
+    def insert(self, record, record_pointer: RecordPointer) -> bool:
         key = self.get_key_value(record)
         
         # search if exxists
         if self.search(key) is not None:
             return False 
             
-        self.insert_recursive(self.root, key, record_pointer)
+        self.insert_recursive(self._load_page(self.root_page_id), key, record_pointer)
         self.save_tree()
         return True
 
@@ -96,13 +124,17 @@ class BPlusTreeUnclusteredIndex:
             node.keys.insert(pos, key)
             node.values.insert(pos, record_pointer)
             
+            # Write modified page back to disk
+            self._write_page(node.id, node)
+            
             # split if is full
             if node.is_full(self.max_keys):
                 self.split_leaf(node)
         else:
             # correct child
             pos = bisect.bisect_right(node.keys, key)
-            child = node.children[pos]
+            child_id = node.children[pos].id if hasattr(node.children[pos], 'id') else pos
+            child = self._load_page(child_id)
             self.insert_recursive(child, key, record_pointer)
             
             # split if is full
@@ -112,7 +144,7 @@ class BPlusTreeUnclusteredIndex:
                 else:
                     self.split_internal(child)
 
-    def update(self, old_key: Any, new_record: 'Record', new_record_pointer: RecordPointer) -> bool:
+    def update(self, old_key: Any, new_record, new_record_pointer: RecordPointer) -> bool:
         new_key = self.get_key_value(new_record)
         
         # just update
@@ -395,7 +427,9 @@ class BPlusTreeUnclusteredIndex:
         leaf.values = leaf.values[:mid]
         
         new_leaf.id = self.next_page_id
-        self.pages[self.next_page_id] = new_leaf
+        self._write_page(self.next_page_id, new_leaf)
+        self._write_page(leaf.id, leaf)  # Write updated original leaf
+        self.next_page_id += 1
         self.next_page_id += 1
         
         promote_key = new_leaf.keys[0]
@@ -454,13 +488,14 @@ class BPlusTreeUnclusteredIndex:
                 self.split_internal(parent)
 
     def find_leaf_node(self, key: Any) -> LeafNode:
-        current = self.root
+        current = self._load_page(self.root_page_id)
         while isinstance(current, InternalNode):
             pos = bisect.bisect_right(current.keys, key)
-            current = current.children[pos]
+            child_id = current.children[pos].id if hasattr(current.children[pos], 'id') else pos
+            current = self._load_page(child_id)
         return current
 
-    def get_key_value(self, record: 'Record') -> Any:
+    def get_key_value(self, record) -> Any:
         return record.get_field_value(self.index_column)
 
     def range_search(self, start_key: Any, end_key: Any) -> List[RecordPointer]:
