@@ -40,7 +40,7 @@ class RTree:
         pass
 
     def search(self, id_record: int) -> Optional[dict]: #optional porque puede que no lo encuentre
-        pass
+        return self.records.get(id_record)
 
     #def rangeSearch ( con el point, radio)
 
