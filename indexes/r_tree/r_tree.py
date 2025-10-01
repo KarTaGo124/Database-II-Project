@@ -5,8 +5,6 @@ import os
 from rtree import index
 from typing import List, Tuple, Any, Optional
 
-
-
 class RTree:
     def __init__(self, dimension: int = 2, filename: str = None):
     #pq no pongo? m ni M, esto se debe a que la libreria de rtree ya usa valores por defecto que estan optimizados para la mayoria de los casos
@@ -51,6 +49,28 @@ class RTree:
         return self.records.get(id_record)
 
     #def rangeSearch ( con el point, radio)
+    def rangeSearch(self, punto: List[float], radio: float) -> List[dict]:
+        if radio<0:
+            raise ValueError("EL RADIO DEBE SER MAYOR O IGUAL A 0")
+        min_c = []
+        max_c =[]
+        for coordeada in punto:
+            min_c.append(coordeada - radio)
+            max_c.append(coordeada + radio)
+        caja = tuple(min_c + max_c)
+        id_vecinos = list(self.idx.intersection(caja))
+        vecinos_dentro_del_radio = []
+        #es importantisimo esto, aqui filtro los que estan dentro del radio, pq la caja puede traer puntos que no estan en el radio
+        for id_record in id_vecinos:
+            record = self.records.get(id_record)
+            if record:
+                dist = self.distancia_euclidiana(tuple(punto), tuple(record['punto']))
+                if dist <= radio:
+                    resultado = record.copy()
+                    resultado['distancia'] = dist
+                    vecinos_dentro_del_radio.append(resultado)
+
+        return vecinos_dentro_del_radio
 
     #def rangeSearch (con el point, k) le voy a poner KNN pq no se como diferenciar si es con radio o con k
     def KNN(self, punto: List[float], k: int) -> List[dict]:
@@ -71,7 +91,7 @@ class RTree:
         return k_vecinos[:k]
 
 
-    #def rangeSearch (begin-key, end-key) va?????
+    #def rangeSearch (begin-key, end-key) va?????  no tiene sentido en rtree 
 
     def add(self, id_record: int, punto: List[float], record) -> bool:
         try: 
@@ -118,5 +138,5 @@ class RTree:
 
     def close(self):
         if self.metadata_file:
-            self._save_metadata()
+            self.save_metadata()
         self.idx.close()
