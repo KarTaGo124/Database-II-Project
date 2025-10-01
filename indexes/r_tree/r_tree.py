@@ -22,11 +22,48 @@ class RTree:
             self.idx = index.Index(properties=p)
             self.metadata_file = None
 
-            self.records = {}
+        self.records = {}
         
         if self.metadata_file and os.path.exists(self.metadata_file):
-            self._load_metadata() # basicamente carga el archivo si existe para no perder los datos
-        
+            self.load_metadata() # basicamente carga el archivo si existe para no perder los datos
+    
+    def count(self) -> int:
+        return len(self.records)
+    
+    def get_all_recs(self) -> List[dict]:
+        return list(self.records.values())
+    
+    def load_metadata(self):
+        pass
 
+    def save_metadata(self):
+        pass
+
+    def search(self, id_record: int) -> Optional[dict]: #optional porque puede que no lo encuentre
+        pass
+
+    #def rangeSearch ( con el point, radio)
+
+    #def rangeSearch (con el point, k)
+
+    #def rangeSearch (begin-key, end-key)
+
+    def add():
+        pass
+
+    def remove():
+        pass
+
+    def distancia_euclidiana():
+        pass
+
+    def punto_a_rectangulo():
+        pass
+
+    def punto_con_radio():
+        pass
+
+
+    
 
         
