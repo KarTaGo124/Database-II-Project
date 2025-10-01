@@ -1,6 +1,6 @@
 from typing import Any, List, Optional, Tuple, Union
 import bisect
-import pickle
+
 import os
 import time
 from ..core.record import Record
@@ -46,37 +46,23 @@ class BPlusTreeClusteredIndex:
         # Performance tracking
         self.performance = PerformanceTracker()
         
-        # for pages - pure disk I/O without cache
         self.pages = {}
         self.next_page_id = 1
         self.root_page_id = 0
         self.root.id = 0
         self.pages[0] = self.root
         
-        # for existing b+tree
-        self.load_tree()
     
     def load_page(self, page_id: int) -> Node:
-        """Load a page from disk with performance tracking - NO CACHE"""
-        # Track disk read EVERY TIME
         self.performance.track_read()
-        
-        # Simulate disk I/O delay (1ms for realistic testing)
-        time.sleep(0.001)
-        
+                
         if page_id in self.pages:
             return self.pages[page_id]
         
         return None
     
     def write_page(self, page_id: int, page: Node):
-        """Write a page to disk with performance tracking - NO CACHE"""
-        # Track disk write EVERY TIME
-        self.performance.track_write()
-        
-        # Simulate disk I/O delay
-        time.sleep(0.001)
-        
+        self.performance.track_write()        
         self.pages[page_id] = page
             
     def search(self, key: Any) -> Optional[Record]:
@@ -94,7 +80,6 @@ class BPlusTreeClusteredIndex:
             return False  
             
         self.insert_recursive(self.load_page(self.root_page_id), key, record)
-        self.save_tree()
         return True
 
     def insert_recursive(self, node: Node, key: Any, record: Record):
@@ -103,7 +88,6 @@ class BPlusTreeClusteredIndex:
             node.keys.insert(pos, key)
             node.records.insert(pos, record)
             
-            # Write modified page back to disk
             self.write_page(node.id, node)
             
             if node.is_full(self.max_keys):
@@ -131,7 +115,6 @@ class BPlusTreeClusteredIndex:
         leaf.keys.pop(pos)
         leaf.records.pop(pos)
         
-        # Write modified page back to disk
         self.write_page(leaf.id, leaf)
         
         if leaf != self.root and leaf.is_underflow(self.min_keys):
@@ -147,8 +130,6 @@ class BPlusTreeClusteredIndex:
                 
                 if old_root_id in self.pages:
                     del self.pages[old_root_id]
-        
-        self.save_tree()
         return True
 
     def handle_leaf_underflow(self, leaf: ClusteredLeafNode):
@@ -425,7 +406,6 @@ class BPlusTreeClusteredIndex:
             parent.children.insert(pos + 1, right_child)
             right_child.parent = parent
             
-            # Write modified parent back to disk
             self.write_page(parent.id, parent)
             
             # Check if parent is now full
@@ -457,63 +437,19 @@ class BPlusTreeClusteredIndex:
                 if leaf.keys[i] >= start_key:
                     results.append(leaf.records[i])  
             
-            # Load next leaf from disk
+
             next_leaf_id = leaf.next.id if leaf.next and hasattr(leaf.next, 'id') else None
             leaf = self.load_page(next_leaf_id) if next_leaf_id else None
             pos = 0
         
         return results
     
-    def save_tree(self):
-        try:
-            with open(self.file_path, 'wb') as f:
-                tree_data = {
-                    'root_page_id': self.root_page_id,
-                    'pages': self.pages,
-                    'next_page_id': self.next_page_id,
-                    'order': self.order,
-                    'key_column': self.key_column,
-                    'first_leaf_id': self.first_leaf.id if self.first_leaf else None
-                }
-                pickle.dump(tree_data, f)
-        except Exception as e:
-            print(f"Error saving clustered tree {e}")
-
-    def load_tree(self):
-        try:
-            if os.path.exists(self.file_path):
-                with open(self.file_path, 'rb') as f:
-                    tree_data = pickle.load(f)
-                    self.root_page_id = tree_data['root_page_id']
-                    self.pages = tree_data['pages']
-                    self.next_page_id = tree_data['next_page_id']
-                    self.root = self.pages[self.root_page_id]
-                    
-                    # first_leaf pointer
-                    first_leaf_id = tree_data.get('first_leaf_id')
-                    if first_leaf_id is not None and first_leaf_id in self.pages:
-                        self.first_leaf = self.pages[first_leaf_id]
-                    else:
-                        # first leaf manually
-                        current = self.root
-                        while isinstance(current, ClusteredInternalNode):
-                            if current.children:
-                                current = current.children[0]
-                            else:
-                                break
-                        self.first_leaf = current if isinstance(current, ClusteredLeafNode) else self.root
-        except Exception as e:
-            print(f"Error loading clustered tree {e}")
-
     def info_btree_clustered(self):
-        """Devuelve estadísticas básicas del árbol clustered."""
         stats = {
             "order": self.order,
             "max_keys": self.max_keys,
             "min_keys": self.min_keys,
             "total_pages": len(self.pages),
             "root_page_id": self.root_page_id,
-            "disk_io_only": True,  # Sin cache
         }
-        # Puedes agregar más estadísticas si lo deseas
         return stats

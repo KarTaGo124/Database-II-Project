@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from .record import Table, Record
 from .performance_tracker import OperationResult, PerformanceTracker
 
+# Import B+ Trees directly without wrappers
 from ..bplus_tree.bplus_tree_clustered import BPlusTreeClusteredIndex
 from ..bplus_tree.bplus_tree_unclustered import BPlusTreeUnclusteredIndex
 
@@ -42,7 +43,7 @@ class DatabaseManager:
             table, primary_index_type, csv_filename
         )
 
-        if primary_index_type == "SEQUboranENTIAL":
+        if primary_index_type == "SEQUENTIAL":
             extra_fields = {"active": ("BOOL", 1)}
             table_with_active = Table(
                 table_name=table.table_name,
@@ -114,7 +115,7 @@ class DatabaseManager:
         table_info = self.tables[table_name]
         primary_index = table_info["primary_index"]
 
-        # B+ Tree Clustered insert returns bool, we need to wrap it
+        # Handle B+ Tree Clustered insert
         if hasattr(primary_index, 'performance'):
             primary_index.performance.start_operation()
         
@@ -196,7 +197,7 @@ class DatabaseManager:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
             primary_index = table_info["primary_index"]
 
-            # Reset performance tracker for secondary index operation
+            # Start performance tracking for secondary index operation
             if hasattr(secondary_index, 'performance'):
                 secondary_index.performance.start_operation()
 
@@ -218,59 +219,21 @@ class DatabaseManager:
                 if not record_pointer:
                     return OperationResult([], secondary_time, secondary_reads, secondary_writes)
 
-                # Now search in primary index using the primary key from record pointer
-                # Start performance tracking for primary index operation
-                if hasattr(primary_index, 'performance'):
-                    primary_index.performance.start_operation()
-
-                # For clustered B+ Tree, get the actual record
-                if hasattr(primary_index, 'search') and 'BPlusTreeClusteredIndex' in str(type(primary_index)):
-                    # Use record_pointer to get the primary key (simplified approach)
-                    # In a real implementation, you'd need to properly map the record pointer
-                    # For now, we'll do a full scan and filter by the indexed field value
-                    if hasattr(primary_index, 'scanAll'):
-                        all_records = primary_index.scanAll()
-                        matching_records = []
-                        for rec in all_records:
-                            if rec.get_field_value(field_name) == value:
-                                matching_records.append(rec)
-                    else:
-                        matching_records = []
-                    
-                    # Get primary performance metrics
-                    if hasattr(primary_index, 'performance'):
-                        primary_result = primary_index.performance.end_operation(matching_records)
-                        primary_time = primary_result.execution_time_ms
-                        primary_reads = primary_result.disk_reads
-                        primary_writes = primary_result.disk_writes
-                    else:
-                        primary_time = 0
-                        primary_reads = 0
-                        primary_writes = 0
-
-                    total_time = secondary_time + primary_time
-                    total_reads = secondary_reads + primary_reads
-                    total_writes = secondary_writes + primary_writes
-
-                    return OperationResult(matching_records, total_time, total_reads, total_writes)
+                # For simplified implementation, do a full scan and filter by the indexed field value
+                if hasattr(primary_index, 'scanAll'):
+                    all_records = primary_index.scanAll()
+                    matching_records = []
+                    for rec in all_records:
+                        if rec.get_field_value(field_name) == value:
+                            matching_records.append(rec)
                 else:
-                    # For other primary index types
-                    # Since we can't properly map record pointers back to records without a proper implementation,
-                    # we'll do a full scan and filter by the indexed field value
-                    if hasattr(primary_index, 'scanAll'):
-                        all_records = primary_index.scanAll()
-                        matching_records = []
-                        for rec in all_records:
-                            if rec.get_field_value(field_name) == value:
-                                matching_records.append(rec)
-                    else:
-                        matching_records = []
-                    
-                    total_time = secondary_time
-                    total_reads = secondary_reads
-                    total_writes = secondary_writes
-                    
-                    return OperationResult(matching_records, total_time, total_reads, total_writes)
+                    matching_records = []
+                
+                total_time = secondary_time
+                total_reads = secondary_reads
+                total_writes = secondary_writes
+                
+                return OperationResult(matching_records, total_time, total_reads, total_writes)
             else:
                 # For other secondary index types that return OperationResult
                 secondary_result = secondary_index.search(value)
@@ -361,7 +324,10 @@ class DatabaseManager:
             secondary_type = secondary_info["type"]
             primary_index = table_info["primary_index"]
 
-            # Reset performance tracker for secondary index operation
+            if secondary_type == "HASH":
+                raise NotImplementedError(f"Range search is not supported for HASH indexes (secondary index on '{field_name}'). Hash indexes are optimized for exact key lookups only.")
+
+            # Start performance tracking for secondary index operation
             if hasattr(secondary_index, 'performance'):
                 secondary_index.performance.start_operation()
 
@@ -383,14 +349,8 @@ class DatabaseManager:
                 if not record_pointers:
                     return OperationResult([], secondary_time, secondary_reads, secondary_writes)
 
-                # Now get records from primary index
-                # Start performance tracking for primary index operation
-                if hasattr(primary_index, 'performance'):
-                    primary_index.performance.start_operation()
-
+                # For simplified implementation, do a full scan and filter by range
                 matching_records = []
-                # For simplified implementation, we'll do a full scan and filter by range
-                # In a real implementation, you'd need to properly map record pointers to records
                 if hasattr(primary_index, 'scanAll'):
                     all_records = primary_index.scanAll()
                     for rec in all_records:
@@ -398,20 +358,9 @@ class DatabaseManager:
                         if start_key <= field_value <= end_key:
                             matching_records.append(rec)
                 
-                # Get primary performance metrics
-                if hasattr(primary_index, 'performance'):
-                    primary_result = primary_index.performance.end_operation(matching_records)
-                    primary_time = primary_result.execution_time_ms
-                    primary_reads = primary_result.disk_reads
-                    primary_writes = primary_result.disk_writes
-                else:
-                    primary_time = 0
-                    primary_reads = 0
-                    primary_writes = 0
-
-                total_time = secondary_time + primary_time
-                total_reads = secondary_reads + primary_reads
-                total_writes = secondary_writes + primary_writes
+                total_time = secondary_time
+                total_reads = secondary_reads
+                total_writes = secondary_writes
 
                 return OperationResult(matching_records, total_time, total_reads, total_writes)
             else:
@@ -527,7 +476,7 @@ class DatabaseManager:
             for fname, index_info in table_info["secondary_indexes"].items():
                 secondary_index = index_info["index"]
                 
-                # Reset performance tracker for secondary index operation
+                # Start performance tracking for secondary index operation
                 if hasattr(secondary_index, 'performance'):
                     secondary_index.performance.start_operation()
                 
@@ -550,7 +499,7 @@ class DatabaseManager:
                 total_writes += secondary_result.disk_writes
                 total_time += secondary_result.execution_time_ms
 
-            # Reset performance tracker for primary index operation
+            # Start performance tracking for primary index operation
             if hasattr(primary_index, 'performance'):
                 primary_index.performance.start_operation()
 
