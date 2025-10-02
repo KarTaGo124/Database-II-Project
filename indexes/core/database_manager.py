@@ -3,8 +3,8 @@ from typing import Dict, Any, List, Tuple, Optional
 from .record import Table, Record
 from .performance_tracker import OperationResult, PerformanceTracker
 
-from indexes.bplus_tree.BTreePrimaryIndex import BTreePrimaryIndex
-from indexes.bplus_tree.BTreeSecondaryIndex import BTreeSecondaryIndex
+from ..bplus_tree.bplus_tree_clustered import BPlusTreeClusteredIndex
+from ..bplus_tree.bplus_tree_unclustered import BPlusTreeUnclusteredIndex
 from ..isam.primary import ISAMPrimaryIndex
 from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR, ISAMSecondaryIndexFLOAT
 from ..extendible_hashing.extendible_hashing import ExtendibleHashing
@@ -94,10 +94,7 @@ class DatabaseManager:
             if hasattr(primary_index, 'scan_all'):
                 try:
                     scan_result = primary_index.scan_all()
-                    if hasattr(scan_result, 'data'):
-                        existing_records = scan_result.data
-                    else:
-                        existing_records = scan_result
+                    existing_records = scan_result.data
 
                     for record in existing_records:
                         secondary_index.insert(record)
@@ -208,9 +205,8 @@ class DatabaseManager:
             primary_index = table_info["primary_index"]
 
             if hasattr(primary_index, 'scan_all'):
-                primary_index.performance.start_operation()
-                all_records = primary_index.scan_all()
-                scan_result = primary_index.performance.end_operation(all_records)
+                scan_result = primary_index.scan_all()
+                all_records = scan_result.data
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
@@ -298,9 +294,8 @@ class DatabaseManager:
             primary_index = table_info["primary_index"]
 
             if hasattr(primary_index, 'scan_all'):
-                primary_index.performance.start_operation()
-                all_records = primary_index.scan_all()
-                scan_result = primary_index.performance.end_operation(all_records)
+                scan_result = primary_index.scan_all()
+                all_records = scan_result.data
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
@@ -371,6 +366,18 @@ class DatabaseManager:
             total_writes = search_result.disk_writes
             total_time = search_result.execution_time_ms
 
+            primary_metrics_reads = search_result.disk_reads
+            primary_metrics_writes = search_result.disk_writes
+            primary_metrics_time = search_result.execution_time_ms
+
+            breakdown = {
+                "primary_metrics": {
+                    "reads": primary_metrics_reads,
+                    "writes": primary_metrics_writes,
+                    "time_ms": primary_metrics_time
+                }
+            }
+
             for fname, index_info in table_info["secondary_indexes"].items():
                 secondary_index = index_info["index"]
                 secondary_result = secondary_index.delete(record)
@@ -378,14 +385,25 @@ class DatabaseManager:
                 total_writes += secondary_result.disk_writes
                 total_time += secondary_result.execution_time_ms
 
+                breakdown[f"secondary_metrics_{fname}"] = {
+                    "reads": secondary_result.disk_reads,
+                    "writes": secondary_result.disk_writes,
+                    "time_ms": secondary_result.execution_time_ms
+                }
+
             delete_result = primary_index.delete(value)
             total_reads += delete_result.disk_reads
             total_writes += delete_result.disk_writes
             total_time += delete_result.execution_time_ms
 
-            return OperationResult(delete_result.data, total_time, total_reads, total_writes, delete_result.rebuild_triggered)
+            breakdown["primary_metrics"]["reads"] += delete_result.disk_reads
+            breakdown["primary_metrics"]["writes"] += delete_result.disk_writes
+            breakdown["primary_metrics"]["time_ms"] += delete_result.execution_time_ms
+
+            return OperationResult(delete_result.data, total_time, total_reads, total_writes, delete_result.rebuild_triggered, operation_breakdown=breakdown)
 
         else:
+            primary_index = table_info["primary_index"]
             search_result = self.search(table_name, value, field_name)
 
             if not search_result.data:
@@ -398,6 +416,14 @@ class DatabaseManager:
 
             records_to_delete = search_result.data
 
+            secondary_delete_metrics = {}
+            for fname in table_info["secondary_indexes"].keys():
+                secondary_delete_metrics[fname] = {"reads": 0, "writes": 0, "time_ms": 0}
+
+            primary_delete_reads = 0
+            primary_delete_writes = 0
+            primary_delete_time = 0
+
             for record in records_to_delete:
                 if hasattr(record, 'get_key'):
                     primary_key = record.get_key()
@@ -405,11 +431,17 @@ class DatabaseManager:
                     for fname, index_info in table_info["secondary_indexes"].items():
                         secondary_index = index_info["index"]
                         secondary_result = secondary_index.delete(record)
+                        secondary_delete_metrics[fname]["reads"] += secondary_result.disk_reads
+                        secondary_delete_metrics[fname]["writes"] += secondary_result.disk_writes
+                        secondary_delete_metrics[fname]["time_ms"] += secondary_result.execution_time_ms
                         total_reads += secondary_result.disk_reads
                         total_writes += secondary_result.disk_writes
                         total_time += secondary_result.execution_time_ms
 
                     primary_delete_result = primary_index.delete(primary_key)
+                    primary_delete_reads += primary_delete_result.disk_reads
+                    primary_delete_writes += primary_delete_result.disk_writes
+                    primary_delete_time += primary_delete_result.execution_time_ms
                     total_reads += primary_delete_result.disk_reads
                     total_writes += primary_delete_result.disk_writes
                     total_time += primary_delete_result.execution_time_ms
@@ -417,7 +449,36 @@ class DatabaseManager:
                     if primary_delete_result.data:
                         deleted_count += 1
 
-            return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=search_result.operation_breakdown)
+            breakdown = {}
+
+            if search_result.operation_breakdown and "secondary_metrics" in search_result.operation_breakdown:
+                breakdown[f"secondary_metrics_{field_name}"] = search_result.operation_breakdown["secondary_metrics"].copy()
+                breakdown["primary_metrics"] = search_result.operation_breakdown["primary_metrics"].copy()
+
+                if field_name in secondary_delete_metrics:
+                    breakdown[f"secondary_metrics_{field_name}"]["reads"] += secondary_delete_metrics[field_name]["reads"]
+                    breakdown[f"secondary_metrics_{field_name}"]["writes"] += secondary_delete_metrics[field_name]["writes"]
+                    breakdown[f"secondary_metrics_{field_name}"]["time_ms"] += secondary_delete_metrics[field_name]["time_ms"]
+
+                for fname, metrics in secondary_delete_metrics.items():
+                    if fname != field_name:
+                        breakdown[f"secondary_metrics_{fname}"] = metrics.copy()
+
+                breakdown["primary_metrics"]["reads"] += primary_delete_reads
+                breakdown["primary_metrics"]["writes"] += primary_delete_writes
+                breakdown["primary_metrics"]["time_ms"] += primary_delete_time
+
+            else:
+                breakdown["primary_metrics"] = {
+                    "reads": search_result.disk_reads + primary_delete_reads,
+                    "writes": search_result.disk_writes + primary_delete_writes,
+                    "time_ms": search_result.execution_time_ms + primary_delete_time
+                }
+
+                for fname, metrics in secondary_delete_metrics.items():
+                    breakdown[f"secondary_metrics_{fname}"] = metrics.copy()
+
+            return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=breakdown if breakdown else None)
 
     def range_delete(self, table_name: str, start_key, end_key, field_name: str = None):
         if table_name not in self.tables:
@@ -436,6 +497,14 @@ class DatabaseManager:
         total_writes = search_result.disk_writes
         total_time = search_result.execution_time_ms
 
+        secondary_delete_metrics = {}
+        for fname in table_info["secondary_indexes"].keys():
+            secondary_delete_metrics[fname] = {"reads": 0, "writes": 0, "time_ms": 0}
+
+        primary_delete_reads = 0
+        primary_delete_writes = 0
+        primary_delete_time = 0
+
         for record in search_result.data:
             if hasattr(record, 'get_key'):
                 primary_key = record.get_key()
@@ -443,11 +512,17 @@ class DatabaseManager:
                 for fname, index_info in table_info["secondary_indexes"].items():
                     secondary_index = index_info["index"]
                     secondary_result = secondary_index.delete(record)
+                    secondary_delete_metrics[fname]["reads"] += secondary_result.disk_reads
+                    secondary_delete_metrics[fname]["writes"] += secondary_result.disk_writes
+                    secondary_delete_metrics[fname]["time_ms"] += secondary_result.execution_time_ms
                     total_reads += secondary_result.disk_reads
                     total_writes += secondary_result.disk_writes
                     total_time += secondary_result.execution_time_ms
 
                 primary_delete_result = primary_index.delete(primary_key)
+                primary_delete_reads += primary_delete_result.disk_reads
+                primary_delete_writes += primary_delete_result.disk_writes
+                primary_delete_time += primary_delete_result.execution_time_ms
                 total_reads += primary_delete_result.disk_reads
                 total_writes += primary_delete_result.disk_writes
                 total_time += primary_delete_result.execution_time_ms
@@ -455,7 +530,47 @@ class DatabaseManager:
                 if primary_delete_result.data:
                     deleted_count += 1
 
-        return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=search_result.operation_breakdown)
+        breakdown = {}
+
+        if field_name is None:
+            breakdown["primary_metrics"] = {
+                "reads": search_result.disk_reads + primary_delete_reads,
+                "writes": search_result.disk_writes + primary_delete_writes,
+                "time_ms": search_result.execution_time_ms + primary_delete_time
+            }
+
+            for fname, metrics in secondary_delete_metrics.items():
+                breakdown[f"secondary_metrics_{fname}"] = metrics.copy()
+
+        elif search_result.operation_breakdown and "secondary_metrics" in search_result.operation_breakdown:
+            # Renombrar secondary_metrics a secondary_metrics_{field_name}
+            breakdown[f"secondary_metrics_{field_name}"] = search_result.operation_breakdown["secondary_metrics"].copy()
+            breakdown["primary_metrics"] = search_result.operation_breakdown["primary_metrics"].copy()
+
+            if field_name in secondary_delete_metrics:
+                breakdown[f"secondary_metrics_{field_name}"]["reads"] += secondary_delete_metrics[field_name]["reads"]
+                breakdown[f"secondary_metrics_{field_name}"]["writes"] += secondary_delete_metrics[field_name]["writes"]
+                breakdown[f"secondary_metrics_{field_name}"]["time_ms"] += secondary_delete_metrics[field_name]["time_ms"]
+
+            for fname, metrics in secondary_delete_metrics.items():
+                if fname != field_name:
+                    breakdown[f"secondary_metrics_{fname}"] = metrics.copy()
+
+            breakdown["primary_metrics"]["reads"] += primary_delete_reads
+            breakdown["primary_metrics"]["writes"] += primary_delete_writes
+            breakdown["primary_metrics"]["time_ms"] += primary_delete_time
+
+        else:
+            breakdown["primary_metrics"] = {
+                "reads": search_result.disk_reads + primary_delete_reads,
+                "writes": search_result.disk_writes + primary_delete_writes,
+                "time_ms": search_result.execution_time_ms + primary_delete_time
+            }
+
+            for fname, metrics in secondary_delete_metrics.items():
+                breakdown[f"secondary_metrics_{fname}"] = metrics.copy()
+
+        return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=breakdown if breakdown else None)
 
     def drop_index(self, table_name: str, field_name: str):
         if table_name not in self.tables:
@@ -531,8 +646,8 @@ class DatabaseManager:
             try:
                 primary_index = table_info["primary_index"]
                 if hasattr(primary_index, 'scan_all'):
-                    records = primary_index.scan_all()
-                    table_stats["record_count"] = len(records) if records else 0
+                    scan_result = primary_index.scan_all()
+                    table_stats["record_count"] = len(scan_result.data) if scan_result.data else 0
                 else:
                     table_stats["record_count"] = 0
             except:
@@ -583,7 +698,7 @@ class DatabaseManager:
             primary_dir = os.path.join(self.base_dir, "primary")
             os.makedirs(primary_dir, exist_ok=True)
             primary_filename = os.path.join(primary_dir, "btree_primary.pkl")
-            return BTreePrimaryIndex(table, primary_filename, order=4)
+            return BPlusTreeClusteredIndex(table, primary_filename, order=4)
 
 
         raise NotImplementedError(f"Primary index type {index_type} not implemented yet")
@@ -616,7 +731,7 @@ class DatabaseManager:
             primary_index = table_info["primary_index"]
             filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_btree.pkl")
             
-            return BTreeSecondaryIndex(field_name, primary_index, filename, order=4)
+            return BPlusTreeUnclusteredIndex(field_name, primary_index, filename, order=4)
         elif index_type == "HASH":
 
             secondary_dir = os.path.join(self.base_dir, "secondary")
@@ -675,5 +790,6 @@ class DatabaseManager:
         table_info = self.tables[table_name]
         primary_index = table_info["primary_index"]
 
+        # scan_all retorna OperationResult
         return primary_index.scan_all()
 

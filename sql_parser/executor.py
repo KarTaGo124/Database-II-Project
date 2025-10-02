@@ -299,7 +299,7 @@ class Executor:
         if where is None:
             res = self.db.scan_all(table)
             projected_data = self._project_records(res.data, plan.columns)
-            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
         if isinstance(where, PredicateEq):
             col = where.column
@@ -308,7 +308,7 @@ class Executor:
             res = self.db.search(table, val, field_name=col)
             data_list = res.data if isinstance(res.data, list) else ([res.data] if res.data else [])
             projected_data = self._project_records(data_list, plan.columns)
-            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
         if isinstance(where, PredicateBetween):
             col = where.column
@@ -316,7 +316,7 @@ class Executor:
             hi = where.hi
             res = self.db.range_search(table, lo, hi, field_name=col)
             projected_data = self._project_records(res.data, plan.columns)
-            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
         if isinstance(where, (PredicateInPointRadius, PredicateKNN)):
             raise NotImplementedError("Predicados espaciales no soportados")
@@ -373,7 +373,7 @@ class Executor:
         res = self.db.insert(plan.table, rec)
 
         success_msg = "OK" if bool(res.data) else "Duplicado/No insertado"
-        return OperationResult(success_msg, res.execution_time_ms, res.disk_reads, res.disk_writes)
+        return OperationResult(success_msg, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
     def _delete(self, plan: DeletePlan):
         tinfo = self.db.get_table_info(plan.table)
@@ -399,7 +399,7 @@ class Executor:
                 except Exception:
                     deleted = 0
             result_msg = f"OK ({deleted} registros)"
-            return OperationResult(result_msg, res.execution_time_ms, res.disk_reads, res.disk_writes)
+            return OperationResult(result_msg, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
         else:
             col = where.column
             lo = where.lo
@@ -412,7 +412,7 @@ class Executor:
             except Exception:
                 deleted = 0
             result_msg = f"OK ({deleted} registros)"
-            return OperationResult(result_msg, res.execution_time_ms, res.disk_reads, res.disk_writes)
+            return OperationResult(result_msg, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
     # ====== CREATE INDEX ======
     def _create_index(self, plan: CreateIndexPlan):
