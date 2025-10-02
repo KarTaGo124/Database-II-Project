@@ -87,8 +87,8 @@ def physical_explain(db_manager, sel_plan) -> str:
 
     if where is None:
         primary = db_manager.tables[table]["primary_index"]
-        if hasattr(primary, "scanAll"):
-            return f"Index Full Scan using {pk_typ}\n  -> full scan (scanAll)"
+        if hasattr(primary, "scan_all"):
+            return f"Index Full Scan using {pk_typ}\n  -> full scan (scan_all)"
         return "Seq Scan\n  -> full table"
 
     if isinstance(where, PredicateEq):
