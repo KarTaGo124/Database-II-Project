@@ -124,7 +124,7 @@ class DatabaseManager:
             total_writes += secondary_result.disk_writes
             total_time += secondary_result.execution_time_ms
 
-        return OperationResult(primary_result.data, total_time, total_reads, total_writes)
+        return OperationResult(primary_result.data, total_time, total_reads, total_writes, primary_result.rebuild_triggered)
 
     def search(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
@@ -326,7 +326,7 @@ class DatabaseManager:
             total_writes += delete_result.disk_writes
             total_time += delete_result.execution_time_ms
 
-            return OperationResult(delete_result.data, total_time, total_reads, total_writes)
+            return OperationResult(delete_result.data, total_time, total_reads, total_writes, delete_result.rebuild_triggered)
 
         else:
             search_result = self.search(table_name, value, field_name)
