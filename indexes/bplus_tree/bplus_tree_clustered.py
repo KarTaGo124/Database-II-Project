@@ -1,8 +1,10 @@
 from typing import Any, List, Optional, Tuple, Union
 import bisect
-import pickle
+
 import os
+import time
 from ..core.record import Record
+from ..core.performance_tracker import PerformanceTracker
 
 
 class Node:
@@ -41,16 +43,29 @@ class BPlusTreeClusteredIndex:
         self.file_path = file_path
         self.first_leaf = self.root
         
-        # for pages
+        # Performance tracking
+        self.performance = PerformanceTracker()
+        
         self.pages = {}
         self.next_page_id = 1
         self.root_page_id = 0
         self.root.id = 0
         self.pages[0] = self.root
         
-        # for existen b+tree
-        self.load_tree()
-    def search(self, key: Any) -> Optional['Record']:
+    
+    def load_page(self, page_id: int) -> Node:
+        self.performance.track_read()
+                
+        if page_id in self.pages:
+            return self.pages[page_id]
+        
+        return None
+    
+    def write_page(self, page_id: int, page: Node):
+        self.performance.track_write()        
+        self.pages[page_id] = page
+            
+    def search(self, key: Any) -> Optional[Record]:
         leaf_node = self.find_leaf_node(key)
         pos = bisect.bisect_left(leaf_node.keys, key)
         
@@ -58,27 +73,29 @@ class BPlusTreeClusteredIndex:
             return leaf_node.records[pos] 
         return None
 
-    def insert(self, record: 'Record') -> bool:
+    def insert(self, record: Record) -> bool:
         key = self.get_key_value(record)
         
         if self.search(key) is not None:
             return False  
             
-        self.insert_recursive(self.root, key, record)
-        self.save_tree()
+        self.insert_recursive(self.load_page(self.root_page_id), key, record)
         return True
 
-    def insert_recursive(self, node: Node, key: Any, record: 'Record'):
+    def insert_recursive(self, node: Node, key: Any, record: Record):
         if isinstance(node, ClusteredLeafNode):
             pos = bisect.bisect_left(node.keys, key)
             node.keys.insert(pos, key)
             node.records.insert(pos, record)
             
+            self.write_page(node.id, node)
+            
             if node.is_full(self.max_keys):
                 self.split_leaf(node)
         else:
             pos = bisect.bisect_right(node.keys, key)
-            child = node.children[pos]
+            child_id = node.children[pos].id if hasattr(node.children[pos], 'id') else pos
+            child = self.load_page(child_id)
             self.insert_recursive(child, key, record)
             
             if child.is_full(self.max_keys):
@@ -86,6 +103,7 @@ class BPlusTreeClusteredIndex:
                     self.split_leaf(child)
                 else:
                     self.split_internal(child)
+                    
     def delete(self, key: Any) -> bool:
         leaf = self.find_leaf_node(key)
         pos = bisect.bisect_left(leaf.keys, key)
@@ -96,6 +114,8 @@ class BPlusTreeClusteredIndex:
         # remove key and record from leaf
         leaf.keys.pop(pos)
         leaf.records.pop(pos)
+        
+        self.write_page(leaf.id, leaf)
         
         if leaf != self.root and leaf.is_underflow(self.min_keys):
             self.handle_leaf_underflow(leaf)
@@ -110,8 +130,6 @@ class BPlusTreeClusteredIndex:
                 
                 if old_root_id in self.pages:
                     del self.pages[old_root_id]
-        
-        self.save_tree()
         return True
 
     def handle_leaf_underflow(self, leaf: ClusteredLeafNode):
@@ -170,6 +188,103 @@ class BPlusTreeClusteredIndex:
         # update parent key
         parent.keys[leaf_index] = right_sibling.keys[0] if right_sibling.keys else borrowed_key
 
+    def merge_leaf_with_left(self, leaf: ClusteredLeafNode, left_sibling: ClusteredLeafNode,
+                             parent: ClusteredInternalNode, leaf_index: int):
+        # move all keys and records from leaf to left sibling
+        left_sibling.keys.extend(leaf.keys)
+        left_sibling.records.extend(leaf.records)
+        
+        # update pointers
+        left_sibling.next = leaf.next
+        if leaf.next:
+            leaf.next.previous = left_sibling
+        
+        # remove leaf from parent
+        parent.children.pop(leaf_index)
+        parent.keys.pop(leaf_index - 1)
+        
+        # remove leaf from pages
+        if leaf.id in self.pages:
+            del self.pages[leaf.id]
+        
+        # handle parent underflow
+        if parent != self.root and parent.is_underflow(self.min_keys):
+            self.handle_internal_underflow(parent)
+
+    def merge_leaf_with_right(self, leaf: ClusteredLeafNode, right_sibling: ClusteredLeafNode,
+                              parent: ClusteredInternalNode, leaf_index: int):
+        # move all keys and records from right sibling to leaf
+        leaf.keys.extend(right_sibling.keys)
+        leaf.records.extend(right_sibling.records)
+        
+        # update pointers
+        leaf.next = right_sibling.next
+        if right_sibling.next:
+            right_sibling.next.previous = leaf
+        
+        # remove right sibling from parent
+        parent.children.pop(leaf_index + 1)
+        parent.keys.pop(leaf_index)
+        
+        # remove right sibling from pages
+        if right_sibling.id in self.pages:
+            del self.pages[right_sibling.id]
+        
+        # handle parent underflow
+        if parent != self.root and parent.is_underflow(self.min_keys):
+            self.handle_internal_underflow(parent)
+
+    def handle_internal_underflow(self, internal: ClusteredInternalNode):
+        parent = internal.parent
+        if not parent:
+            return
+        
+        internal_index = parent.children.index(internal)
+        
+        # try to borrow from left sibling
+        if internal_index > 0:
+            left_sibling = parent.children[internal_index - 1]
+            if isinstance(left_sibling, ClusteredInternalNode) and len(left_sibling.keys) > self.min_keys:
+                self.borrow_from_left_internal(internal, left_sibling, parent, internal_index)
+                return
+        
+        # try to borrow from right sibling
+        if internal_index < len(parent.children) - 1:
+            right_sibling = parent.children[internal_index + 1]
+            if isinstance(right_sibling, ClusteredInternalNode) and len(right_sibling.keys) > self.min_keys:
+                self.borrow_from_right_internal(internal, right_sibling, parent, internal_index)
+                return
+        
+        # merge with sibling
+        if internal_index > 0:
+            left_sibling = parent.children[internal_index - 1]
+            if isinstance(left_sibling, ClusteredInternalNode):
+                self.merge_internal_with_left(internal, left_sibling, parent, internal_index)
+        else:
+            right_sibling = parent.children[internal_index + 1]
+            if isinstance(right_sibling, ClusteredInternalNode):
+                self.merge_internal_with_right(internal, right_sibling, parent, internal_index)
+
+    def borrow_from_left_internal(self, internal: ClusteredInternalNode, left_sibling: ClusteredInternalNode,
+                                  parent: ClusteredInternalNode, internal_index: int):
+        separator_key = parent.keys[internal_index - 1]
+        
+        internal.keys.insert(0, separator_key)
+        internal.children.insert(0, left_sibling.children.pop())
+        internal.children[0].parent = internal
+        
+        parent.keys[internal_index - 1] = left_sibling.keys.pop()
+
+    def borrow_from_right_internal(self, internal: ClusteredInternalNode, right_sibling: ClusteredInternalNode,
+                                   parent: ClusteredInternalNode, internal_index: int):
+        separator_key = parent.keys[internal_index]
+        
+        internal.keys.append(separator_key)
+        internal.children.append(right_sibling.children.pop(0))
+        internal.children[-1].parent = internal
+        
+        parent.keys[internal_index] = right_sibling.keys.pop(0)
+
     def merge_internal_with_left(self, internal: ClusteredInternalNode, left_sibling: ClusteredInternalNode,
                                  parent: ClusteredInternalNode, internal_index: int):
         separator_key = parent.keys[internal_index - 1]
@@ -189,6 +304,7 @@ class BPlusTreeClusteredIndex:
         
         if parent != self.root and parent.is_underflow(self.min_keys):
             self.handle_internal_underflow(parent)
+            
     def merge_internal_with_right(self, internal: ClusteredInternalNode, right_sibling: ClusteredInternalNode,
                                   parent: ClusteredInternalNode, internal_index: int):
         separator_key = parent.keys[internal_index]
@@ -232,7 +348,7 @@ class BPlusTreeClusteredIndex:
         
         # assign page ID to new node and add to pages
         new_leaf.id = self.next_page_id
-        self.pages[self.next_page_id] = new_leaf
+        self.write_page(self.next_page_id, new_leaf)
         self.next_page_id += 1
         
         # promote the first key of new leaf to parent
@@ -260,7 +376,7 @@ class BPlusTreeClusteredIndex:
         
         # assign page ID to new node and add to pages
         new_internal.id = self.next_page_id
-        self.pages[self.next_page_id] = new_internal
+        self.write_page(self.next_page_id, new_internal)
         self.next_page_id += 1
         
         # promote middle key to parent
@@ -278,7 +394,7 @@ class BPlusTreeClusteredIndex:
             # update root references
             self.root = new_root
             new_root.id = self.next_page_id
-            self.pages[self.next_page_id] = new_root
+            self.write_page(self.next_page_id, new_root)
             self.next_page_id += 1
             self.root_page_id = new_root.id
             
@@ -290,21 +406,24 @@ class BPlusTreeClusteredIndex:
             parent.children.insert(pos + 1, right_child)
             right_child.parent = parent
             
+            self.write_page(parent.id, parent)
+            
             # Check if parent is now full
             if parent.is_full(self.max_keys):
                 self.split_internal(parent)
                 
     def find_leaf_node(self, key: Any) -> ClusteredLeafNode:
-        current = self.root
+        current = self.load_page(self.root_page_id)
         while isinstance(current, ClusteredInternalNode):
             pos = bisect.bisect_right(current.keys, key)
-            current = current.children[pos]
+            child_id = current.children[pos].id if hasattr(current.children[pos], 'id') else pos
+            current = self.load_page(child_id)
         return current
 
-    def get_key_value(self, record: 'Record') -> Any:
+    def get_key_value(self, record: Record) -> Any:
         return record.get_field_value(self.key_column)
     
-    def range_search(self, start_key: Any, end_key: Any) -> List['Record']:
+    def range_search(self, start_key: Any, end_key: Any) -> List[Record]:
         results = []
         leaf = self.find_leaf_node(start_key)
         
@@ -318,54 +437,14 @@ class BPlusTreeClusteredIndex:
                 if leaf.keys[i] >= start_key:
                     results.append(leaf.records[i])  
             
-            leaf = leaf.next
+
+            next_leaf_id = leaf.next.id if leaf.next and hasattr(leaf.next, 'id') else None
+            leaf = self.load_page(next_leaf_id) if next_leaf_id else None
             pos = 0
         
         return results
     
-    def save_tree(self):
-        try:
-            with open(self.file_path, 'wb') as f:
-                tree_data = {
-                    'root_page_id': self.root_page_id,
-                    'pages': self.pages,
-                    'next_page_id': self.next_page_id,
-                    'order': self.order,
-                    'key_column': self.key_column,
-                    'first_leaf_id': self.first_leaf.id if self.first_leaf else None
-                }
-                pickle.dump(tree_data, f)
-        except Exception as e:
-            print(f"Error saving clustered tree {e}")
-
-    def load_tree(self):
-        try:
-            if os.path.exists(self.file_path):
-                with open(self.file_path, 'rb') as f:
-                    tree_data = pickle.load(f)
-                    self.root_page_id = tree_data['root_page_id']
-                    self.pages = tree_data['pages']
-                    self.next_page_id = tree_data['next_page_id']
-                    self.root = self.pages[self.root_page_id]
-                    
-                    # first_leaf pointer
-                    first_leaf_id = tree_data.get('first_leaf_id')
-                    if first_leaf_id is not None and first_leaf_id in self.pages:
-                        self.first_leaf = self.pages[first_leaf_id]
-                    else:
-                        # first leaf manually
-                        current = self.root
-                        while isinstance(current, ClusteredInternalNode):
-                            if current.children:
-                                current = current.children[0]
-                            else:
-                                break
-                        self.first_leaf = current if isinstance(current, ClusteredLeafNode) else self.root
-        except Exception as e:
-            print(f"Error loading clustered tree {e}")
-
     def info_btree_clustered(self):
-        """Devuelve estadísticas básicas del árbol clustered."""
         stats = {
             "order": self.order,
             "max_keys": self.max_keys,
@@ -373,5 +452,4 @@ class BPlusTreeClusteredIndex:
             "total_pages": len(self.pages),
             "root_page_id": self.root_page_id,
         }
-        # Puedes agregar más estadísticas si lo deseas
         return stats
