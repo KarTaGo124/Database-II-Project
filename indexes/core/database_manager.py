@@ -3,9 +3,12 @@ from typing import Dict, Any, List, Tuple, Optional
 from .record import Table, Record
 from .performance_tracker import OperationResult, PerformanceTracker
 
-# Import B+ Trees directly without wrappers
 from ..bplus_tree.bplus_tree_clustered import BPlusTreeClusteredIndex
 from ..bplus_tree.bplus_tree_unclustered import BPlusTreeUnclusteredIndex
+from ..isam.primary import ISAMPrimaryIndex
+from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR, ISAMSecondaryIndexFLOAT
+from ..extendible_hashing.extendible_hashing import ExtendibleHashing
+from ..sequential_file.sequential_file import SequentialFile
 
 class DatabaseManager:
 
@@ -88,9 +91,9 @@ class DatabaseManager:
 
         if scan_existing:
             primary_index = table_info["primary_index"]
-            if hasattr(primary_index, 'scanAll'):
+            if hasattr(primary_index, 'scan_all'):
                 try:
-                    existing_records = primary_index.scanAll()
+                    existing_records = primary_index.scan_all()
                     for record in existing_records:
                         # Handle B+ Tree unclustered differently
                         if hasattr(secondary_index, 'insert') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
@@ -160,7 +163,7 @@ class DatabaseManager:
             total_writes += secondary_result.disk_writes
             total_time += secondary_result.execution_time_ms
 
-        return OperationResult(primary_result.data, total_time, total_reads, total_writes)
+        return OperationResult(primary_result.data, total_time, total_reads, total_writes, primary_result.rebuild_triggered)
 
     def search(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
@@ -269,9 +272,9 @@ class DatabaseManager:
 
             primary_index = table_info["primary_index"]
 
-            if hasattr(primary_index, 'scanAll'):
+            if hasattr(primary_index, 'scan_all'):
                 primary_index.performance.start_operation()
-                all_records = primary_index.scanAll()
+                all_records = primary_index.scan_all()
                 scan_result = primary_index.performance.end_operation(all_records)
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
@@ -398,9 +401,9 @@ class DatabaseManager:
 
             primary_index = table_info["primary_index"]
 
-            if hasattr(primary_index, 'scanAll'):
+            if hasattr(primary_index, 'scan_all'):
                 primary_index.performance.start_operation()
-                all_records = primary_index.scanAll()
+                all_records = primary_index.scan_all()
                 scan_result = primary_index.performance.end_operation(all_records)
             else:
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
@@ -520,7 +523,7 @@ class DatabaseManager:
             total_writes += delete_result.disk_writes
             total_time += delete_result.execution_time_ms
 
-            return OperationResult(delete_result.data, total_time, total_reads, total_writes)
+            return OperationResult(delete_result.data, total_time, total_reads, total_writes, delete_result.rebuild_triggered)
 
         else:
             search_result = self.search(table_name, value, field_name)
@@ -642,8 +645,8 @@ class DatabaseManager:
 
             try:
                 primary_index = table_info["primary_index"]
-                if hasattr(primary_index, 'scanAll'):
-                    records = primary_index.scanAll()
+                if hasattr(primary_index, 'scan_all'):
+                    records = primary_index.scan_all()
                     table_stats["record_count"] = len(records) if records else 0
                 else:
                     table_stats["record_count"] = 0
@@ -668,7 +671,6 @@ class DatabaseManager:
 
     def _create_primary_index(self, table: Table, index_type: str, csv_filename: str):
         if index_type == "ISAM":
-            from ..isam.primary import ISAMPrimaryIndex
 
             primary_dir = os.path.join(self.base_dir, "primary")
             os.makedirs(primary_dir, exist_ok=True)
@@ -677,7 +679,6 @@ class DatabaseManager:
             return ISAMPrimaryIndex(table, primary_filename)
 
         elif index_type == "SEQUENTIAL":
-            from ..sequential_file.sequential_file import SequentialFile
 
             primary_dir = os.path.join(self.base_dir, "primary")
             os.makedirs(primary_dir, exist_ok=True)
@@ -711,7 +712,6 @@ class DatabaseManager:
         field_type, field_size = self._get_field_info(table, field_name)
 
         if index_type == "ISAM":
-            from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR, ISAMSecondaryIndexFLOAT
 
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
@@ -740,7 +740,6 @@ class DatabaseManager:
                 file_path=filename
             )
         elif index_type == "HASH":
-            from ..extendible_hashing.extendible_hashing import ExtendibleHashing
 
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
@@ -790,5 +789,14 @@ class DatabaseManager:
             print(f"  Disk accesses: {result.total_disk_accesses} (R:{result.disk_reads}, W:{result.disk_writes})")
         else:
             print(f"{operation_name} completed (no metrics available)")
+
+    def scan_all(self, table_name: str):
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} does not exist")
+
+        table_info = self.tables[table_name]
+        primary_index = table_info["primary_index"]
+
+        return primary_index.scan_all()
 
 
