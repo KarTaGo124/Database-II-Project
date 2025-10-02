@@ -93,7 +93,12 @@ class DatabaseManager:
             primary_index = table_info["primary_index"]
             if hasattr(primary_index, 'scan_all'):
                 try:
-                    existing_records = primary_index.scan_all()
+                    scan_result = primary_index.scan_all()
+                    if hasattr(scan_result, 'data'):
+                        existing_records = scan_result.data
+                    else:
+                        existing_records = scan_result
+
                     for record in existing_records:
                         secondary_index.insert(record)
                 except Exception as e:
@@ -117,6 +122,10 @@ class DatabaseManager:
         total_writes = primary_result.disk_writes
         total_time = primary_result.execution_time_ms
 
+        breakdown = {
+            "primary_metrics": {"reads": primary_result.disk_reads, "writes": primary_result.disk_writes, "time_ms": primary_result.execution_time_ms}
+        }
+
         for field_name, index_info in table_info["secondary_indexes"].items():
             secondary_index = index_info["index"]
             secondary_result = secondary_index.insert(record)
@@ -124,7 +133,13 @@ class DatabaseManager:
             total_writes += secondary_result.disk_writes
             total_time += secondary_result.execution_time_ms
 
-        return OperationResult(primary_result.data, total_time, total_reads, total_writes, primary_result.rebuild_triggered)
+            breakdown[f"secondary_metrics_{field_name}"] = {
+                "reads": secondary_result.disk_reads,
+                "writes": secondary_result.disk_writes,
+                "time_ms": secondary_result.execution_time_ms
+            }
+
+        return OperationResult(primary_result.data, total_time, total_reads, total_writes, primary_result.rebuild_triggered, breakdown)
 
     def search(self, table_name: str, value, field_name: str = None):
         if table_name not in self.tables:
@@ -146,22 +161,43 @@ class DatabaseManager:
 
             secondary_result = secondary_index.search(value)
             if not secondary_result.data:
-                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
+                breakdown = {
+                    "primary_metrics": {"reads": 0, "writes": 0, "time_ms": 0},
+                    "secondary_metrics": {"reads": secondary_result.disk_reads, "writes": secondary_result.disk_writes, "time_ms": secondary_result.execution_time_ms}
+                }
+                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes, operation_breakdown=breakdown)
 
             total_reads = secondary_result.disk_reads
             total_writes = secondary_result.disk_writes
             total_time = secondary_result.execution_time_ms
 
+            primary_lookup_reads = 0
+            primary_lookup_writes = 0
+            primary_lookup_time = 0
+
             if secondary_result.data:
                 matching_records = []
                 for primary_key in secondary_result.data:
-                    primary_result = primary_index.search_without_metrics(primary_key)
-                    if primary_result:
-                        matching_records.append(primary_result)
+                    primary_result = primary_index.search(primary_key)
+                    primary_lookup_reads += primary_result.disk_reads
+                    primary_lookup_writes += primary_result.disk_writes
+                    primary_lookup_time += primary_result.execution_time_ms
+
+                    if primary_result.data:
+                        matching_records.append(primary_result.data)
+
+                total_reads += primary_lookup_reads
+                total_writes += primary_lookup_writes
+                total_time += primary_lookup_time
             else:
                 matching_records = []
 
-            return OperationResult(matching_records, total_time, total_reads, total_writes)
+            breakdown = {
+                "primary_metrics": {"reads": primary_lookup_reads, "writes": primary_lookup_writes, "time_ms": primary_lookup_time},
+                "secondary_metrics": {"reads": secondary_result.disk_reads, "writes": secondary_result.disk_writes, "time_ms": secondary_result.execution_time_ms}
+            }
+
+            return OperationResult(matching_records, total_time, total_reads, total_writes, operation_breakdown=breakdown)
 
         else:
             table = table_info["table"]
@@ -215,22 +251,43 @@ class DatabaseManager:
 
             secondary_result = secondary_index.range_search(start_key, end_key)
             if not secondary_result.data:
-                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes)
+                breakdown = {
+                    "primary_metrics": {"reads": 0, "writes": 0, "time_ms": 0},
+                    "secondary_metrics": {"reads": secondary_result.disk_reads, "writes": secondary_result.disk_writes, "time_ms": secondary_result.execution_time_ms}
+                }
+                return OperationResult([], secondary_result.execution_time_ms, secondary_result.disk_reads, secondary_result.disk_writes, operation_breakdown=breakdown)
 
             total_reads = secondary_result.disk_reads
             total_writes = secondary_result.disk_writes
             total_time = secondary_result.execution_time_ms
 
+            primary_lookup_reads = 0
+            primary_lookup_writes = 0
+            primary_lookup_time = 0
+
             if secondary_result.data:
                 matching_records = []
                 for primary_key in secondary_result.data:
-                    primary_result = primary_index.search_without_metrics(primary_key)
-                    if primary_result:
-                        matching_records.append(primary_result)
+                    primary_result = primary_index.search(primary_key)
+                    primary_lookup_reads += primary_result.disk_reads
+                    primary_lookup_writes += primary_result.disk_writes
+                    primary_lookup_time += primary_result.execution_time_ms
+
+                    if primary_result.data:
+                        matching_records.append(primary_result.data)
+
+                total_reads += primary_lookup_reads
+                total_writes += primary_lookup_writes
+                total_time += primary_lookup_time
             else:
                 matching_records = []
 
-            return OperationResult(matching_records, total_time, total_reads, total_writes)
+            breakdown = {
+                "primary_metrics": {"reads": primary_lookup_reads, "writes": primary_lookup_writes, "time_ms": primary_lookup_time},
+                "secondary_metrics": {"reads": secondary_result.disk_reads, "writes": secondary_result.disk_writes, "time_ms": secondary_result.execution_time_ms}
+            }
+
+            return OperationResult(matching_records, total_time, total_reads, total_writes, operation_breakdown=breakdown)
 
         else:
             table = table_info["table"]
@@ -332,7 +389,7 @@ class DatabaseManager:
             search_result = self.search(table_name, value, field_name)
 
             if not search_result.data:
-                return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
+                return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes, operation_breakdown=search_result.operation_breakdown)
 
             deleted_count = 0
             total_reads = search_result.disk_reads
@@ -342,23 +399,37 @@ class DatabaseManager:
             records_to_delete = search_result.data
 
             for record in records_to_delete:
-                delete_result = self.delete(table_name, record.get_key())
-                if delete_result.data:
-                    deleted_count += 1
-                total_reads += delete_result.disk_reads
-                total_writes += delete_result.disk_writes
-                total_time += delete_result.execution_time_ms
+                if hasattr(record, 'get_key'):
+                    primary_key = record.get_key()
 
-            return OperationResult(deleted_count, total_time, total_reads, total_writes)
+                    for fname, index_info in table_info["secondary_indexes"].items():
+                        secondary_index = index_info["index"]
+                        secondary_result = secondary_index.delete(record)
+                        total_reads += secondary_result.disk_reads
+                        total_writes += secondary_result.disk_writes
+                        total_time += secondary_result.execution_time_ms
+
+                    primary_delete_result = primary_index.delete(primary_key)
+                    total_reads += primary_delete_result.disk_reads
+                    total_writes += primary_delete_result.disk_writes
+                    total_time += primary_delete_result.execution_time_ms
+
+                    if primary_delete_result.data:
+                        deleted_count += 1
+
+            return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=search_result.operation_breakdown)
 
     def range_delete(self, table_name: str, start_key, end_key, field_name: str = None):
         if table_name not in self.tables:
             raise ValueError(f"Table {table_name} does not exist")
 
+        table_info = self.tables[table_name]
+        primary_index = table_info["primary_index"]
+
         search_result = self.range_search(table_name, start_key, end_key, field_name)
 
         if not search_result.data:
-            return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes)
+            return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes, operation_breakdown=search_result.operation_breakdown)
 
         deleted_count = 0
         total_reads = search_result.disk_reads
@@ -366,14 +437,25 @@ class DatabaseManager:
         total_time = search_result.execution_time_ms
 
         for record in search_result.data:
-            delete_result = self.delete(table_name, record.get_key())
-            if delete_result.data:
-                deleted_count += 1
-            total_reads += delete_result.disk_reads
-            total_writes += delete_result.disk_writes
-            total_time += delete_result.execution_time_ms
+            if hasattr(record, 'get_key'):
+                primary_key = record.get_key()
 
-        return OperationResult(deleted_count, total_time, total_reads, total_writes)
+                for fname, index_info in table_info["secondary_indexes"].items():
+                    secondary_index = index_info["index"]
+                    secondary_result = secondary_index.delete(record)
+                    total_reads += secondary_result.disk_reads
+                    total_writes += secondary_result.disk_writes
+                    total_time += secondary_result.execution_time_ms
+
+                primary_delete_result = primary_index.delete(primary_key)
+                total_reads += primary_delete_result.disk_reads
+                total_writes += primary_delete_result.disk_writes
+                total_time += primary_delete_result.execution_time_ms
+
+                if primary_delete_result.data:
+                    deleted_count += 1
+
+        return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=search_result.operation_breakdown)
 
     def drop_index(self, table_name: str, field_name: str):
         if table_name not in self.tables:
