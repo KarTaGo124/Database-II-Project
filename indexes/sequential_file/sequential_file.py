@@ -114,6 +114,8 @@ class SequentialFile:
                             self.deleted_count += 1
 
                             rebuild_triggered = self.total_records > 0 and self.deleted_count > (self.total_records * 0.1)
+                            f.close()
+
                             if rebuild_triggered:
                                 self.rebuild()
 
@@ -140,6 +142,8 @@ class SequentialFile:
                             self.deleted_count += 1
 
                             rebuild_triggered = self.total_records > 0 and self.deleted_count > (self.total_records * 0.1)
+                            f.close()
+
                             if rebuild_triggered:
                                 self.rebuild()
 
