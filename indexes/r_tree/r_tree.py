@@ -1,4 +1,3 @@
-# R Tree Index
 import math
 import pickle
 import os
@@ -7,11 +6,10 @@ from typing import List, Tuple, Any, Optional
 
 class RTree:
     def __init__(self, dimension: int = 2, filename: str = None):
-    #pq no pongo? m ni M, esto se debe a que la libreria de rtree ya usa valores por defecto que estan optimizados para la mayoria de los casos
         self.dimension = dimension
         self.filename = filename
 
-        p = index.Property() #estocrea el objeto 
+        p = index.Property()
         p.dimension = dimension 
         if filename:
             self.idx = index.Index(filename, properties=p)
@@ -19,50 +17,55 @@ class RTree:
         else:
             self.idx = index.Index(properties=p)
             self.metadata_file = None
-
-        self.records = {}
-        
+    
+    def _load_all_metadata(self) -> dict:
         if self.metadata_file and os.path.exists(self.metadata_file):
-            self.load_metadata() # basicamente carga el archivo si existe para no perder los datos
+            try:
+                with open(self.metadata_file, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                print(f"ERROR AL CARGAR METADATA: {e}")
+                return {}
+        return {}
+    
+    def _save_all_metadata(self, records: dict):
+        if self.metadata_file:
+            try:
+                with open(self.metadata_file, 'wb') as f:
+                    pickle.dump(records, f)
+            except Exception as e:
+                print(f"ERROR AL GUARDAR METADATA: {e}")
     
     def count(self) -> int:
-        return len(self.records)
+        records = self._load_all_metadata()
+        return len(records)
     
     def get_all_recs(self) -> List[dict]:
-        return list(self.records.values())
+        records = self._load_all_metadata()
+        return list(records.values())
     
-    def load_metadata(self):
-        try:
-            with open(self.metadata_file, 'rb') as f:
-                self.records = pickle.load(f) # carga el diccionario
-        except Exception as e:
-            print(f"ERROR AL CARGAR METADATA: {e}")
+    def search(self, id_record: int) -> Optional[dict]:
+        records = self._load_all_metadata()
+        return records.get(id_record)
 
-    def save_metadata(self):
-        try: 
-            with open(self.metadata_file, 'wb') as f:
-                pickle.dump(self.records, f) # guarda el diccionario de records (literalmente asi se llama el metodo)
-        except Exception as e:
-            print(f"ERROR AL GUARDAR METADATA: {e}")
-
-    def search(self, id_record: int) -> Optional[dict]: #optional porque puede que no lo encuentre
-        return self.records.get(id_record)
-
-    #def rangeSearch ( con el point, radio)
     def rangeSearch(self, punto: List[float], radio: float) -> List[dict]:
-        if radio<0:
+        if radio < 0:
             raise ValueError("EL RADIO DEBE SER MAYOR O IGUAL A 0")
+        
         min_c = []
-        max_c =[]
+        max_c = []
         for coordeada in punto:
             min_c.append(coordeada - radio)
             max_c.append(coordeada + radio)
+        
         caja = tuple(min_c + max_c)
         id_vecinos = list(self.idx.intersection(caja))
         vecinos_dentro_del_radio = []
-        #es importantisimo esto, aqui filtro los que estan dentro del radio, pq la caja puede traer puntos que no estan en el radio
+        
+        records = self._load_all_metadata()
+        
         for id_record in id_vecinos:
-            record = self.records.get(id_record)
+            record = records.get(id_record)
             if record:
                 dist = self.distancia_euclidiana(tuple(punto), tuple(record['punto']))
                 if dist <= radio:
@@ -72,15 +75,18 @@ class RTree:
 
         return vecinos_dentro_del_radio
 
-    #def rangeSearch (con el point, k) le voy a poner KNN pq no se como diferenciar si es con radio o con k
     def KNN(self, punto: List[float], k: int) -> List[dict]:
-        if k<=0:
+        if k <= 0:
             raise ValueError("K DEBE SER MAYOR A 0")
+        
         caja = self.punto_a_rectangulo(punto)
         id_k_vecinos = list(self.idx.nearest(caja, k))
         k_vecinos = []
+        
+        records = self._load_all_metadata()
+        
         for id_record in id_k_vecinos:
-            record = self.records.get(id_record)
+            record = records.get(id_record)
             if record:
                 dist = self.distancia_euclidiana(tuple(punto), tuple(record['punto']))
                 resultado = record.copy()
@@ -90,33 +96,34 @@ class RTree:
         k_vecinos.sort(key=lambda x: x['distancia'])
         return k_vecinos[:k]
 
-
-    #def rangeSearch (begin-key, end-key) va?????  no tiene sentido en rtree 
-
-    def add(self, id_record: int, punto: List[float], record) -> bool:
+    def insert(self, id_record: int, punto: List[float], record) -> bool:
         try: 
             caja = self.punto_a_rectangulo(punto)
-            self.idx.insert(id_record, caja) 
-            self.records[id_record] = { 'id': id_record, 'punto': punto, 'record': record}
-            if self.metadata_file:
-                self.save_metadata()
+            self.idx.insert(id_record, caja)
+            
+            records = self._load_all_metadata()
+            records[id_record] = {'id': id_record, 'punto': punto, 'record': record}
+            self._save_all_metadata(records)
+            
             return True
         except Exception as e:
             print(f"ERROR AL AÑADIR: {e}")
             return False
 
-    def remove(self, id_record: int) -> bool:
-        record = self.records.get(id_record)
+    def delete(self, id_record: int) -> bool:
+        records = self._load_all_metadata()
+        record = records.get(id_record)
+        
         if not record:
             print("ERROR: EL ID NO EXISTE")
             return False
+        
         try:
             caja = self.punto_a_rectangulo(record['punto'])
             self.idx.delete(id_record, caja)
-            del self.records[id_record]
-
-            if self.metadata_file:
-                self.save_metadata()
+            del records[id_record]
+            self._save_all_metadata(records)
+            
             return True
         except Exception as e:
             print(f"ERROR AL ELIMINAR: {e}")
@@ -131,12 +138,9 @@ class RTree:
         return math.sqrt(suma)
 
     def punto_a_rectangulo(self, punto: List[float]) -> Tuple:
-        # el rtree (la libreria) piensa con cajas, no con puntos por ejemplo el punto (3,4) en realidad es la caja (3,4,3,4) y asi
         if len(punto) != self.dimension:
             raise ValueError(f"El punto debe tener {self.dimension} dimensiones")
         return tuple(punto + punto)
 
     def close(self):
-        if self.metadata_file:
-            self.save_metadata()
         self.idx.close()
