@@ -221,8 +221,8 @@ class ISAMSecondaryBase:
                 return self.performance.end_operation(True)
 
             search_key = self._get_search_key(secondary_value)
-            target_leaf_page_num = self._find_target_leaf_page(search_key)
-            target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
+            target_leaf_page_num = self._find_target_leaf_page(search_key, track_reads=True)
+            target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num, track_reads=True)
 
             with open(self.filename, "r+b") as file:
                 page = self._read_page(file, target_data_page_num)
@@ -246,8 +246,8 @@ class ISAMSecondaryBase:
             return self.performance.end_operation(primary_keys)
 
         search_key = self._get_search_key(secondary_value)
-        target_leaf_page_num = self._find_target_leaf_page(search_key)
-        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
+        target_leaf_page_num = self._find_target_leaf_page(search_key, track_reads=True)
+        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num, track_reads=True)
 
         current_page_num = target_data_page_num
 
@@ -277,8 +277,8 @@ class ISAMSecondaryBase:
             return self.performance.end_operation(primary_keys)
 
         search_key = self._get_search_key(start_value)
-        target_leaf_page_num = self._find_target_leaf_page(search_key)
-        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
+        target_leaf_page_num = self._find_target_leaf_page(search_key, track_reads=True)
+        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num, track_reads=True)
 
         current_page_num = target_data_page_num
 
@@ -310,8 +310,8 @@ class ISAMSecondaryBase:
             return False
 
         search_key = self._get_search_key(secondary_value)
-        target_leaf_page_num = self._find_target_leaf_page(search_key)
-        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num)
+        target_leaf_page_num = self._find_target_leaf_page(search_key, track_reads=True)
+        target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num, track_reads=True)
 
         current_page_num = target_data_page_num
 
@@ -407,22 +407,24 @@ class ISAMSecondaryBase:
 
     # Funciones extras
 
-    def scanAll(self):
+    def scan_all(self):
+        self.performance.start_operation()
+
         results = []
 
         if not os.path.exists(self.filename):
-            return results
+            return self.performance.end_operation(results)
 
         try:
             with open(self.filename, "rb") as file:
                 file_size = os.path.getsize(self.filename)
                 if file_size < self.DATA_START_OFFSET:
-                    return results
+                    return self.performance.end_operation(results)
 
                 page_size = SecondaryPage.HEADER_SIZE + self.block_factor * self.index_record_template.RECORD_SIZE
                 num_pages = (file_size - self.DATA_START_OFFSET) // page_size
 
-            
+
                 file.seek(self.DATA_START_OFFSET)
                 page_data = file.read(page_size)
                 self.performance.track_read()
@@ -452,18 +454,27 @@ class ISAMSecondaryBase:
         except Exception as e:
             pass
 
-        return results
+        return self.performance.end_operation(results)
 
     def rebuild(self):
+        self.performance.start_operation()
+
         files_to_clean = [self.filename, self.root_index_filename, self.leaf_index_filename, self.free_list_filename]
         for file_path in files_to_clean:
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-        all_primary_records = self.primary_isam.scanAll()
+        all_primary_records_result = self.primary_isam.scan_all()
+        if hasattr(all_primary_records_result, 'data'):
+            all_primary_records = all_primary_records_result.data
+        else:
+            all_primary_records = all_primary_records_result
+
         if all_primary_records:
             for record in all_primary_records:
-                self.add_to_secondary(record)
+                self.insert(record)
+
+        return self.performance.end_operation(True)
 
 
     def show_structure(self):
@@ -696,26 +707,32 @@ class ISAMSecondaryIndexINT(ISAMSecondaryBase):
     def _create_initial_files(self, first_record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 1))
+            self.performance.track_write()
 
             page = SecondaryPage([first_record], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
             file.write(page.pack())
+            self.performance.track_write()
 
         with open(self.root_index_filename, "wb") as root_file:
             root_entry = IntRootIndexEntry(first_record.get_key(), 0)
             root_index = IntRootIndex([root_entry], self.root_index_block_factor)
             root_file.write(root_index.pack())
+            self.performance.track_write()
 
         with open(self.leaf_index_filename, "wb") as leaf_file:
             leaf_entry = IntLeafIndexEntry(first_record.get_key(), 0)
             leaf_index = IntLeafIndex([leaf_entry], self.leaf_index_block_factor)
             leaf_file.write(leaf_index.pack())
+            self.performance.track_write()
 
-    def _find_target_leaf_page(self, key_value):
+    def _find_target_leaf_page(self, key_value, track_reads=False):
         if not os.path.exists(self.root_index_filename):
             return 0
 
         with open(self.root_index_filename, "rb") as file:
             root_index = IntRootIndex.unpack(file.read(), self.root_index_block_factor)
+            if track_reads:
+                self.performance.track_read()
 
         for i in range(len(root_index.entries) - 1, -1, -1):
             if key_value >= root_index.entries[i].key:
@@ -723,13 +740,15 @@ class ISAMSecondaryIndexINT(ISAMSecondaryBase):
 
         return 0
 
-    def _find_target_data_page(self, key_value, leaf_page_num):
+    def _find_target_data_page(self, key_value, leaf_page_num, track_reads=False):
         if not os.path.exists(self.leaf_index_filename):
             return 0
 
         with open(self.leaf_index_filename, "rb") as file:
             file.seek(leaf_page_num * IntLeafIndex().SIZE_OF_LEAF_INDEX)
             leaf_data = file.read(IntLeafIndex().SIZE_OF_LEAF_INDEX)
+            if track_reads:
+                self.performance.track_read()
             if len(leaf_data) < IntLeafIndex().SIZE_OF_LEAF_INDEX:
                 return 0
             leaf_index = IntLeafIndex.unpack(leaf_data, self.leaf_index_block_factor)
@@ -910,46 +929,62 @@ class ISAMSecondaryIndexCHAR(ISAMSecondaryBase):
         return str(secondary_value)
 
     def _values_equal(self, val1, val2):
-        str_val1 = val1.decode('utf-8').rstrip('\x00').rstrip() if isinstance(val1, bytes) else str(val1).rstrip()
-        str_val2 = val2.decode('utf-8').rstrip('\x00').rstrip() if isinstance(val2, bytes) else str(val2).rstrip()
-        return str_val1 == str_val2
+        try:
+            str_val1 = val1.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(val1, bytes) else str(val1).rstrip()
+            str_val2 = val2.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(val2, bytes) else str(val2).rstrip()
+            return str_val1 == str_val2
+        except (UnicodeDecodeError, AttributeError):
+            return False
 
     def _value_greater(self, val1, val2):
-        str_val1 = val1.decode('utf-8').rstrip('\x00').rstrip() if isinstance(val1, bytes) else str(val1).rstrip()
-        str_val2 = val2.decode('utf-8').rstrip('\x00').rstrip() if isinstance(val2, bytes) else str(val2).rstrip()
-        return str_val1 > str_val2
+        try:
+            str_val1 = val1.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(val1, bytes) else str(val1).rstrip()
+            str_val2 = val2.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(val2, bytes) else str(val2).rstrip()
+            return str_val1 > str_val2
+        except (UnicodeDecodeError, AttributeError):
+            return False
 
     def _value_in_range(self, value, start, end):
-        str_val = value.decode('utf-8').rstrip('\x00').rstrip() if isinstance(value, bytes) else str(value).rstrip()
-        str_start = start.decode('utf-8').rstrip('\x00').rstrip() if isinstance(start, bytes) else str(start).rstrip()
-        str_end = end.decode('utf-8').rstrip('\x00').rstrip() if isinstance(end, bytes) else str(end).rstrip()
-        return str_start <= str_val <= str_end
+        try:
+            str_val = value.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(value, bytes) else str(value).rstrip()
+            str_start = start.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(start, bytes) else str(start).rstrip()
+            str_end = end.decode('utf-8', errors='ignore').rstrip('\x00').rstrip() if isinstance(end, bytes) else str(end).rstrip()
+            return str_start <= str_val <= str_end
+        except (UnicodeDecodeError, AttributeError):
+            # Fallback para casos problemáticos
+            return False
 
     def _create_initial_files(self, first_record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 1))
+            self.performance.track_write()
 
             page = SecondaryPage([first_record], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
             file.write(page.pack())
+            self.performance.track_write()
 
         with open(self.root_index_filename, "wb") as root_file:
             key_str = self._get_search_key(first_record.get_key())
             root_entry = CharRootIndexEntry(key_str, 0, self.max_key_size)
             root_index = CharRootIndex([root_entry], self.root_index_block_factor, self.max_key_size)
             root_file.write(root_index.pack())
+            self.performance.track_write()
 
         with open(self.leaf_index_filename, "wb") as leaf_file:
             key_str = self._get_search_key(first_record.get_key())
             leaf_entry = CharLeafIndexEntry(key_str, 0, self.max_key_size)
             leaf_index = CharLeafIndex([leaf_entry], self.leaf_index_block_factor, self.max_key_size)
             leaf_file.write(leaf_index.pack())
+            self.performance.track_write()
 
-    def _find_target_leaf_page(self, key_value):
+    def _find_target_leaf_page(self, key_value, track_reads=False):
         if not os.path.exists(self.root_index_filename):
             return 0
 
         with open(self.root_index_filename, "rb") as file:
             root_index = CharRootIndex.unpack(file.read(), self.root_index_block_factor, self.max_key_size)
+            if track_reads:
+                self.performance.track_read()
 
         for i in range(len(root_index.entries) - 1, -1, -1):
             if key_value >= root_index.entries[i].key:
@@ -957,7 +992,7 @@ class ISAMSecondaryIndexCHAR(ISAMSecondaryBase):
 
         return 0
 
-    def _find_target_data_page(self, key_value, leaf_page_num):
+    def _find_target_data_page(self, key_value, leaf_page_num, track_reads=False):
         if not os.path.exists(self.leaf_index_filename):
             return 0
 
@@ -965,6 +1000,8 @@ class ISAMSecondaryIndexCHAR(ISAMSecondaryBase):
             leaf_index_size = CharLeafIndex(max_key_size=self.max_key_size).SIZE_OF_LEAF_INDEX
             file.seek(leaf_page_num * leaf_index_size)
             leaf_data = file.read(leaf_index_size)
+            if track_reads:
+                self.performance.track_read()
             if len(leaf_data) < leaf_index_size:
                 return 0
             leaf_index = CharLeafIndex.unpack(leaf_data, self.leaf_index_block_factor, self.max_key_size)
@@ -1146,26 +1183,32 @@ class ISAMSecondaryIndexFLOAT(ISAMSecondaryBase):
     def _create_initial_files(self, first_record):
         with open(self.filename, "wb") as file:
             file.write(struct.pack(self.HEADER_FORMAT, 1))
+            self.performance.track_write()
 
             page = SecondaryPage([first_record], -1, self.block_factor, self.index_record_template.RECORD_SIZE)
             file.write(page.pack())
+            self.performance.track_write()
 
         with open(self.root_index_filename, "wb") as root_file:
             root_entry = FloatRootIndexEntry(first_record.get_key(), 0)
             root_index = FloatRootIndex([root_entry], self.root_index_block_factor)
             root_file.write(root_index.pack())
+            self.performance.track_write()
 
         with open(self.leaf_index_filename, "wb") as leaf_file:
             leaf_entry = FloatLeafIndexEntry(first_record.get_key(), 0)
             leaf_index = FloatLeafIndex([leaf_entry], self.leaf_index_block_factor)
             leaf_file.write(leaf_index.pack())
+            self.performance.track_write()
 
-    def _find_target_leaf_page(self, key_value):
+    def _find_target_leaf_page(self, key_value, track_reads=False):
         if not os.path.exists(self.root_index_filename):
             return 0
 
         with open(self.root_index_filename, "rb") as file:
             root_index = FloatRootIndex.unpack(file.read(), self.root_index_block_factor)
+            if track_reads:
+                self.performance.track_read()
 
         for i in range(len(root_index.entries) - 1, -1, -1):
             if key_value >= root_index.entries[i].key:
@@ -1173,13 +1216,15 @@ class ISAMSecondaryIndexFLOAT(ISAMSecondaryBase):
 
         return 0
 
-    def _find_target_data_page(self, key_value, leaf_page_num):
+    def _find_target_data_page(self, key_value, leaf_page_num, track_reads=False):
         if not os.path.exists(self.leaf_index_filename):
             return 0
 
         with open(self.leaf_index_filename, "rb") as file:
             file.seek(leaf_page_num * FloatLeafIndex().SIZE_OF_LEAF_INDEX)
             leaf_data = file.read(FloatLeafIndex().SIZE_OF_LEAF_INDEX)
+            if track_reads:
+                self.performance.track_read()
             if len(leaf_data) < FloatLeafIndex().SIZE_OF_LEAF_INDEX:
                 return 0
             leaf_index = FloatLeafIndex.unpack(leaf_data, self.leaf_index_block_factor)

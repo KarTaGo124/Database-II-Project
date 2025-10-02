@@ -41,32 +41,40 @@ class Bucket:
     def insert(self, packed_record, bucketfile):
         tombstone = b'\x00' * self.index_record_size
         insert_position = None
+        reads_for_tombstones = 0
+
         # First, look for tombstones in existing allocated slots
         for i in range(self.allocated_slots):
             slot_pos = self.bucket_pos + self.HEADER_SIZE + (i * self.index_record_size)
             bucketfile.seek(slot_pos)
             if bucketfile.read(self.index_record_size) == tombstone:
+                reads_for_tombstones += 1
                 insert_position = slot_pos
                 break
+            reads_for_tombstones += 1
+
         # If no tombstone found and we have space, allocate a new slot
         if insert_position is None:
             if self.allocated_slots < BLOCK_FACTOR:
                 insert_position = self.bucket_pos + self.HEADER_SIZE + (self.allocated_slots * self.index_record_size)
                 self.allocated_slots += 1
             else:
-                return False  # Bucket is full
+                return False, reads_for_tombstones, 0  # Bucket is full
+
         bucketfile.seek(insert_position)
-        bucketfile.write(packed_record)
+        bucketfile.write(packed_record)              # WRITE #1 - record data
         self.actual_size += 1
         bucketfile.seek(self.bucket_pos)
         bucketfile.write(struct.pack(self.HEADER_FORMAT, self.local_depth, self.allocated_slots,
-                                     self.actual_size, self.next_bucket))
-        return True
+                                     self.actual_size, self.next_bucket))  # WRITE #2 - header
+        return True, reads_for_tombstones, 2
 
     def delete(self, secondary_key, bucketfile, index_record_template):
         current_bucket = self
         tombstone = b'\x00' * self.index_record_size
         deleted_count = 0
+        total_reads = 0
+        total_writes = 0
 
         while current_bucket is not None:
             # Check all allocated slots
@@ -74,6 +82,7 @@ class Bucket:
                 record_pos = current_bucket.bucket_pos + self.HEADER_SIZE + (i * self.index_record_size)
                 bucketfile.seek(record_pos)
                 packed_record = bucketfile.read(self.index_record_size)
+                total_reads += 1
                 if packed_record == tombstone:
                     continue
                 try:
@@ -87,23 +96,26 @@ class Bucket:
                     if stored_key == secondary_key:
                         bucketfile.seek(record_pos)
                         bucketfile.write(tombstone)
+                        total_writes += 1
                         current_bucket.actual_size -= 1
                         deleted_count += 1
                         bucketfile.seek(current_bucket.bucket_pos)
                         bucketfile.write(struct.pack(self.HEADER_FORMAT, current_bucket.local_depth,
                                                      current_bucket.allocated_slots, current_bucket.actual_size,
                                                      current_bucket.next_bucket))
+                        total_writes += 1
                 except struct.error:
                     continue
 
             if current_bucket.next_bucket != -1:
                 bucketfile.seek(current_bucket.next_bucket)
                 ld, slots, size, nb = struct.unpack(self.HEADER_FORMAT, bucketfile.read(self.HEADER_SIZE))
+                total_reads += 1
                 current_bucket = Bucket(current_bucket.next_bucket, self.index_record_size, ld, slots, size, nb)
             else:
                 break
 
-        return deleted_count
+        return deleted_count, total_reads, total_writes
 
 class ExtendibleHashing:
     HEADER_FORMAT = "ii"  # global_depth, free_pointer
@@ -122,10 +134,13 @@ class ExtendibleHashing:
         self.index_record_size = self.index_record_template.RECORD_SIZE
         self.performance = PerformanceTracker()
         create_new = not os.path.exists(self.dirname) or not os.path.exists(self.bucketname)
-        self.dirfile = open(self.dirname, 'r+b' if not create_new else 'w+b')
-        self.bucketfile = open(self.bucketname, 'r+b' if not create_new else 'w+b')
+
         if create_new:
+            self.dirfile = open(self.dirname, 'w+b')
+            self.bucketfile = open(self.bucketname, 'w+b')
             self._initialize_files()
+            self.dirfile.close()
+            self.bucketfile.close()
         else:
             self.global_depth, self.free_pointer = self._read_header()
 
@@ -145,6 +160,10 @@ class ExtendibleHashing:
         ld, slots, size, nb = struct.unpack(Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE))
         return Bucket(bucket_pos, self.index_record_size, ld, slots, size, nb)
 
+    def _with_files(self, operation, *args, **kwargs):
+        with open(self.dirname, 'r+b') as dirfile, open(self.bucketname, 'r+b') as bucketfile:
+            return operation(dirfile, bucketfile, *args, **kwargs)
+
     def _append_new_bucket(self, local_depth):
         if self.free_pointer == -1:
             self.bucketfile.seek(0, 2)
@@ -161,30 +180,67 @@ class ExtendibleHashing:
         self.bucketfile.write(tombstone * BLOCK_FACTOR) #write size of bucket so new pos will get it right when appending another bucket
         return new_pos
 
+    def _open_files(self):
+        self.dirfile = open(self.dirname, 'r+b')
+        self.bucketfile = open(self.bucketname, 'r+b')
+
+    def _close_files(self):
+        if hasattr(self, 'dirfile') and self.dirfile:
+            self.dirfile.close()
+        if hasattr(self, 'bucketfile') and self.bucketfile:
+            self.bucketfile.close()
+
     def search(self, key):
         self.performance.start_operation()
 
-        bucket = self._get_bucket_from_key(key)
-        packed_records = bucket.get_all_records(self.bucketfile)
-        matching_pks = []
-        disk_reads = 1
+        try:
+            self._open_files()
 
-        for packed_rec in packed_records:
-            try:
-                unpacked = IndexRecord.unpack(packed_rec, self.index_record_template.value_type_size, "index_value")
-                value = unpacked.index_value
-                if isinstance(value, bytes):
-                    value = value.decode('utf-8').strip('\x00').strip()
+            bucket = self._get_bucket_from_key(key)
+            initial_reads = 2  # 1 directory + 1 bucket header
+
+            all_records = []
+            current_bucket = bucket
+            overflow_reads = 0
+
+            while current_bucket is not None:
+                if current_bucket.allocated_slots > 0:
+                    self.bucketfile.seek(current_bucket.bucket_pos + Bucket.HEADER_SIZE)
+                    for _ in range(current_bucket.allocated_slots):
+                        packed_record = self.bucketfile.read(self.index_record_size)
+                        if packed_record != (b'\x00' * self.index_record_size):
+                            all_records.append(packed_record)
+                    overflow_reads += 1  # Read data from this bucket
+
+                if current_bucket.next_bucket != -1:
+                    self.bucketfile.seek(current_bucket.next_bucket)
+                    ld, slots, size, nb = struct.unpack(Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE))
+                    current_bucket = Bucket(current_bucket.next_bucket, self.index_record_size, ld, slots, size, nb)
+                    overflow_reads += 1  # Read header of overflow bucket
                 else:
-                    value = str(value).strip()
-                if value == key:
-                    matching_pks.append(unpacked.primary_key)
-            except struct.error:
-                continue
+                    current_bucket = None
 
-        self.performance.reads = disk_reads
-        self.performance.writes = 0
-        return self.performance.end_operation(matching_pks)
+            disk_reads = initial_reads + overflow_reads
+            matching_pks = []
+
+            for packed_rec in all_records:
+                try:
+                    unpacked = IndexRecord.unpack(packed_rec, self.index_record_template.value_type_size, "index_value")
+                    value = unpacked.index_value
+                    if isinstance(value, bytes):
+                        value = value.decode('utf-8').strip('\x00').strip()
+                    else:
+                        value = str(value).strip()
+                    if value == key:
+                        matching_pks.append(unpacked.primary_key)
+                except struct.error:
+                    continue
+
+            self.performance.reads = disk_reads
+            self.performance.writes = 0
+            return self.performance.end_operation(matching_pks)
+        finally:
+            self._close_files()
 
     def insert(self, data_record: Record):
         self.performance.start_operation()
@@ -192,6 +248,22 @@ class ExtendibleHashing:
         secondary_key = getattr(data_record, self.index_field_name, None)
         if secondary_key is None:
             secondary_key = data_record.__dict__.get(self.index_field_name)
+
+        if secondary_key is None:
+            self.performance.reads = 0
+            self.performance.writes = 0
+            return self.performance.end_operation(True)
+
+        if isinstance(secondary_key, bytes):
+            secondary_key = secondary_key.decode('utf-8').strip('\x00').strip()
+
+        try:
+            self._open_files()
+            return self._insert_with_files(data_record, secondary_key)
+        finally:
+            self._close_files()
+
+    def _insert_with_files(self, data_record, secondary_key):
         primary_key = data_record.get_key()
         index_entry = IndexRecord(self.index_record_template.value_type_size[0][1],
                                   self.index_record_template.value_type_size[0][2])
@@ -201,37 +273,44 @@ class ExtendibleHashing:
         head_bucket = self._get_bucket_from_key(secondary_key)
         current_bucket = head_bucket
         overflow_count = 0
-        disk_reads = 1
+        disk_reads = 2  # 1 directory read + 1 bucket header read
         disk_writes = 0
 
         while True:
-            if current_bucket.insert(packed_record, self.bucketfile):
-                disk_writes += 1
+            success, tombstone_reads, insert_writes = current_bucket.insert(packed_record, self.bucketfile)
+            disk_reads += tombstone_reads
+            if success:
+                disk_writes += insert_writes
                 self.performance.reads = disk_reads
                 self.performance.writes = disk_writes
                 return self.performance.end_operation(True)
             if current_bucket.next_bucket != -1:
                 overflow_count += 1
-                disk_reads += 1
+                disk_reads += 1  # Read overflow bucket header
                 self.bucketfile.seek(current_bucket.next_bucket)
                 ld, slots, size, nb = struct.unpack(Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE))
                 current_bucket = Bucket(current_bucket.next_bucket, self.index_record_size, ld, slots, size, nb)
             else:
                 break
 
-        if overflow_count < MAX_OVERFLOW:
-            new_bucket_pos = self._append_new_bucket(head_bucket.local_depth)
-            current_bucket.next_bucket = new_bucket_pos
-            self.bucketfile.seek(current_bucket.bucket_pos)
-            self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, current_bucket.local_depth,
-                                              current_bucket.allocated_slots, current_bucket.actual_size,
-                                              current_bucket.next_bucket))
-            new_bucket = Bucket(new_bucket_pos, self.index_record_size, head_bucket.local_depth, 0, 0, -1)
-            new_bucket.insert(packed_record, self.bucketfile)
-            disk_writes += 3
-        else:
+        if head_bucket.local_depth < self.global_depth:
             self._split_bucket(head_bucket, index_entry)
             disk_writes += 2
+        else:
+            if overflow_count < MAX_OVERFLOW:
+                new_bucket_pos = self._append_new_bucket(head_bucket.local_depth)
+                current_bucket.next_bucket = new_bucket_pos
+                self.bucketfile.seek(current_bucket.bucket_pos)
+                self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, current_bucket.local_depth,
+                                                  current_bucket.allocated_slots, current_bucket.actual_size,
+                                                  current_bucket.next_bucket))
+                new_bucket = Bucket(new_bucket_pos, self.index_record_size, head_bucket.local_depth, 0, 0, -1)
+                new_bucket.insert(packed_record, self.bucketfile)
+                disk_writes += 3
+            else:
+                self._double_directory()
+                self._split_bucket(head_bucket, index_entry)
+                disk_writes += 3
 
         self.performance.reads = disk_reads
         self.performance.writes = disk_writes
@@ -240,14 +319,112 @@ class ExtendibleHashing:
     def delete(self, secondary_key):
         self.performance.start_operation()
 
-        bucket = self._get_bucket_from_key(secondary_key)
-        deleted_count = bucket.delete(secondary_key, self.bucketfile, self.index_record_template)
-        disk_reads = 1
-        disk_writes = 1 if deleted_count > 0 else 0
+        try:
+            self._open_files()
 
-        self.performance.reads = disk_reads
-        self.performance.writes = disk_writes
-        return self.performance.end_operation(deleted_count > 0)
+            bucket = self._get_bucket_from_key(secondary_key)
+            deleted_count, bucket_reads, bucket_writes = bucket.delete(secondary_key, self.bucketfile, self.index_record_template)
+            disk_reads = 2 + bucket_reads  # 1 directory read + 1 bucket header read + bucket_reads
+            disk_writes = bucket_writes
+
+            if deleted_count > 0:
+                self._try_merge_buckets(bucket)
+                disk_writes += 1
+
+            self.performance.reads = disk_reads
+            self.performance.writes = disk_writes
+            return self.performance.end_operation(deleted_count > 0)
+        finally:
+            self._close_files()
+
+    def _try_merge_buckets(self, bucket):
+        if bucket.actual_size == 0:
+            self._handle_empty_bucket(bucket)
+            return True
+
+        if bucket.local_depth <= 1 or bucket.actual_size > BLOCK_FACTOR // 2:
+            return False
+
+        merge_candidate = self._find_merge_candidate(bucket)
+        if merge_candidate and (bucket.actual_size + merge_candidate.actual_size) <= BLOCK_FACTOR:
+            self._merge_two_buckets(bucket, merge_candidate)
+            return True
+
+        return False
+
+    def _handle_empty_bucket(self, empty_bucket):
+        self._redirect_directory_entries(empty_bucket.bucket_pos)
+        self.free_bucket(empty_bucket.bucket_pos)
+
+    def _find_merge_candidate(self, bucket):
+        dir_size = 2 ** self.global_depth
+        best_candidate = None
+        min_records = BLOCK_FACTOR
+
+        for i in range(dir_size):
+            self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+            pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
+
+            if pos != bucket.bucket_pos:
+                self.bucketfile.seek(pos)
+                ld, slots, size, nb = struct.unpack(Bucket.HEADER_FORMAT, self.bucketfile.read(Bucket.HEADER_SIZE))
+
+                if ld == bucket.local_depth and size < min_records and size > 0:
+                    min_records = size
+                    best_candidate = Bucket(pos, self.index_record_size, ld, slots, size, nb)
+
+        return best_candidate
+
+    def _redirect_directory_entries(self, empty_bucket_pos):
+        dir_size = 2 ** self.global_depth
+        replacement_pos = None
+
+        for i in range(dir_size):
+            self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+            pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
+            if pos != empty_bucket_pos:
+                replacement_pos = pos
+                break
+
+        if replacement_pos:
+            for i in range(dir_size):
+                self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
+                if pos == empty_bucket_pos:
+                    self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                    self.dirfile.write(struct.pack(self.DIR_FORMAT, replacement_pos))
+
+    def _merge_two_buckets(self, bucket1, bucket2):
+        records1 = bucket1.get_all_records(self.bucketfile)
+        records2 = bucket2.get_all_records(self.bucketfile)
+        all_records = records1 + records2
+
+        new_local_depth = bucket1.local_depth - 1
+        bucket1.local_depth = new_local_depth
+        bucket1.allocated_slots = len(all_records)
+        bucket1.actual_size = len(all_records)
+        bucket1.next_bucket = -1
+
+        self.bucketfile.seek(bucket1.bucket_pos)
+        self.bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, bucket1.local_depth,
+                                          bucket1.allocated_slots, bucket1.actual_size, bucket1.next_bucket))
+
+        for i, record in enumerate(all_records):
+            record_pos = bucket1.bucket_pos + Bucket.HEADER_SIZE + (i * self.index_record_size)
+            self.bucketfile.seek(record_pos)
+            self.bucketfile.write(record)
+
+        self._update_directory_after_merge(bucket1.bucket_pos, bucket2.bucket_pos, new_local_depth)
+        self.free_bucket(bucket2.bucket_pos)
+
+    def _update_directory_after_merge(self, remaining_bucket, removed_bucket, new_local_depth):
+        dir_size = 2 ** self.global_depth
+        for i in range(dir_size):
+            self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+            pos = struct.unpack(self.DIR_FORMAT, self.dirfile.read(self.DIR_SIZE))[0]
+            if pos == removed_bucket:
+                self.dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                self.dirfile.write(struct.pack(self.DIR_FORMAT, remaining_bucket))
 
     def _split_bucket(self, head_bucket: Bucket, new_index_record: IndexRecord):
         if head_bucket.local_depth == self.global_depth:
@@ -282,12 +459,13 @@ class ExtendibleHashing:
             self.insert(unpacked)
 
     def _read_header(self):
-        self.dirfile.seek(0)
-        return struct.unpack(self.HEADER_FORMAT, self.dirfile.read(self.HEADER_SIZE))
+        with open(self.dirname, 'rb') as dirfile:
+            return struct.unpack(self.HEADER_FORMAT, dirfile.read(self.HEADER_SIZE))
 
     def _write_header(self):
-        self.dirfile.seek(0)
-        self.dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, self.free_pointer))
+        with open(self.dirname, 'r+b') as dirfile:
+            dirfile.seek(0)
+            dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, self.free_pointer))
 
     def free_bucket(self, bucket_pos):
         self.bucketfile.seek(bucket_pos)
@@ -302,10 +480,11 @@ class ExtendibleHashing:
         self._write_header()
         bucket0_pos = self._append_new_bucket(local_depth=1)
         bucket1_pos = self._append_new_bucket(local_depth=1)
-        self.dirfile.seek(self.HEADER_SIZE)
-        for i in range(2 ** self.global_depth):
-            bucket_pos = bucket0_pos if (i % 2 == 0) else bucket1_pos
-            self.dirfile.write(struct.pack(self.DIR_FORMAT, bucket_pos))
+        with open(self.dirname, 'r+b') as dirfile:
+            dirfile.seek(self.HEADER_SIZE)
+            for i in range(2 ** self.global_depth):
+                bucket_pos = bucket0_pos if (i % 2 == 0) else bucket1_pos
+                dirfile.write(struct.pack(self.DIR_FORMAT, bucket_pos))
 
     def _double_directory(self):
         self.dirfile.seek(0)
@@ -337,24 +516,14 @@ class ExtendibleHashing:
 
     def drop_index(self):
         removed_files = []
+        files_to_remove = [self.dirname, self.bucketname]
 
-        try:
-            self.close()
-
-            files_to_remove = [self.dirname, self.bucketname]
-
-            for file_path in files_to_remove:
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                        removed_files.append(file_path)
-                    except OSError:
-                        pass
-        except Exception:
-            pass
+        for file_path in files_to_remove:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    removed_files.append(file_path)
+                except OSError:
+                    pass
 
         return removed_files
-
-    def close(self):
-        self.dirfile.close()
-        self.bucketfile.close()

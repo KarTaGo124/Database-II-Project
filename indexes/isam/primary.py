@@ -416,6 +416,7 @@ class ISAMPrimaryIndex:
         self.performance.track_write()
         file.write(leaf_index.pack())
 
+
     # Operaciones intermedias
     
     def _find_target_leaf_page(self, key_value):
@@ -633,30 +634,6 @@ class ISAMPrimaryIndex:
 
         return None
 
-    def _search_in_page_chain_no_tracking(self, file, start_page_num, key_value):
-        """Versión optimizada sin tracking para search_without_metrics"""
-        current_page_num = start_page_num
-        visited = set()
-
-        while current_page_num != -1 and current_page_num not in visited:
-            visited.add(current_page_num)
-            try:
-                # Leer página sin tracking
-                page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
-                offset = self.DATA_START_OFFSET + (current_page_num * page_size)
-                file.seek(offset)
-                page_data = file.read(page_size)
-                page = Page.unpack(page_data, self.block_factor, self.record_template.RECORD_SIZE, self.table)
-
-                for record in page.records:
-                    if record.get_key() == key_value:
-                        return record
-
-                current_page_num = page.next_page if page.next_page != -1 else -1
-            except:
-                break
-
-        return None
 
     def _update_leaf_index_after_split(self, right_key, right_page_num, left_page_num, left_key, leaf_page_num):
         with open(self.leaf_index_file, "r+b") as file:
@@ -708,17 +685,22 @@ class ISAMPrimaryIndex:
             if page.remove_record(key_value):
                 self._write_page(file, current_page_num, page)
 
+                rebuild_triggered = False
                 if len(page.records) == 0 and self._is_overflow_page(current_page_num):
                     self._remove_page_from_chain(file, start_page_num, current_page_num)
                     self.free_list_stack.push_free_page(current_page_num)
                 elif len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, current_page_num)
 
-                return True
+                if self._should_rebuild():
+                    self.rebuild()
+                    rebuild_triggered = True
+
+                return True, rebuild_triggered
 
             current_page_num = page.next_page
 
-        return False
+        return False, False
 
     def _try_consolidate_page(self, file, page_num):
         page = self._read_page(file, page_num)
@@ -755,34 +737,7 @@ class ISAMPrimaryIndex:
             
             current_page_num = page.next_page
 
-    def _extract_all_records(self):
-        all_records = []
-        if not os.path.exists(self.filename):
-            return all_records
 
-        with open(self.filename, "rb") as file:
-            file_size = os.path.getsize(self.filename)
-            if file_size < self.DATA_START_OFFSET:
-                return all_records
-
-            page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
-            num_pages = (file_size - self.DATA_START_OFFSET) // page_size
-            visited = set()
-
-            for i in range(num_pages):
-                if i in visited:
-                    continue
-
-                current_page_num = i
-                while current_page_num is not None and current_page_num not in visited:
-                    visited.add(current_page_num)
-                    page = self._read_page(file, current_page_num)
-
-                    all_records.extend(page.records)
-                    current_page_num = page.next_page if page.next_page != -1 else None
-
-        all_records.sort(key=lambda r: r.get_key())
-        return all_records
 
     def _count_overflow_chain_length(self, file, start_page_num):
         if self._is_overflow_page(start_page_num):
@@ -849,12 +804,13 @@ class ISAMPrimaryIndex:
     def insert(self, record: Record):
         self.performance.start_operation()
 
-        if self.search_without_metrics(record.get_key()) is not None:
+        existing_record_result = self.search(record.get_key())
+        if existing_record_result.data is not None:
             raise ValueError(f"Primary key {record.get_key()} already exists")
 
         if not os.path.exists(self.filename):
             self._create_initial_files(record)
-            return self.performance.end_operation(True)
+            return self.performance.end_operation(True, False)
 
         target_leaf_page_num = self._find_target_leaf_page(record.get_key())
         target_data_page_num = self._find_target_data_page(record.get_key(), target_leaf_page_num)
@@ -868,13 +824,13 @@ class ISAMPrimaryIndex:
             else:
                 self._handle_page_overflow(file, target_data_page_num, page, record, target_leaf_page_num)
 
-        return self.performance.end_operation(True)
+        return self.performance.end_operation(True, False)
 
     def search(self, key_value):
         self.performance.start_operation()
 
         if not os.path.exists(self.filename):
-            return self.performance.end_operation(None)
+            return self.performance.end_operation(None, False)
 
         with open(self.root_index_file, "rb") as root_file, \
              open(self.leaf_index_file, "rb") as leaf_file, \
@@ -889,47 +845,6 @@ class ISAMPrimaryIndex:
             result = self._search_in_page_chain(data_file, target_data_page_num, key_value)
             return self.performance.end_operation(result)
 
-    def search_without_metrics(self, key_value):
-        if not os.path.exists(self.filename):
-            return None
-
-        with open(self.root_index_file, "rb") as root_file, \
-             open(self.leaf_index_file, "rb") as leaf_file, \
-             open(self.filename, "rb") as data_file:
-
-            root_index = RootIndex.unpack(root_file.read(RootIndex.HEADER_SIZE + self.root_index_block_factor * RootIndexEntry.SIZE), self.root_index_block_factor)
-            target_leaf_page_num = root_index.find_leaf_page_for_key(key_value)
-
-            leaf_file.seek(target_leaf_page_num * (LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE))
-            leaf_data = leaf_file.read(LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE)
-            leaf_index = LeafIndex.unpack(leaf_data, self.leaf_index_block_factor)
-            target_data_page_num = leaf_index.find_data_page_for_key(key_value)
-
-            return self._search_in_page_chain_no_tracking(data_file, target_data_page_num, key_value)
-
-    def batch_search(self, key_list):
-        self.performance.start_operation()
-        results = []
-
-        if not os.path.exists(self.filename):
-            return self.performance.end_operation(results)
-
-        with open(self.root_index_file, "rb") as root_file, \
-             open(self.leaf_index_file, "rb") as leaf_file, \
-             open(self.filename, "rb") as data_file:
-
-            for key_value in key_list:
-                root_index = self._read_root_index(root_file, 0)
-                target_leaf_page_num = root_index.find_leaf_page_for_key(key_value)
-
-                leaf_index = self._read_leaf_index(leaf_file, target_leaf_page_num)
-                target_data_page_num = leaf_index.find_data_page_for_key(key_value)
-
-                result = self._search_in_page_chain(data_file, target_data_page_num, key_value)
-                if result:
-                    results.append(result)
-
-        return self.performance.end_operation(results)
 
     def delete(self, key_value):
         self.performance.start_operation()
@@ -946,16 +861,18 @@ class ISAMPrimaryIndex:
             if page.remove_record(key_value):
                 self._write_page(file, target_data_page_num, page)
 
+                rebuild_triggered = False
                 if len(page.records) <= self.consolidation_threshold:
                     self._try_consolidate_page(file, target_data_page_num)
 
                     if self._should_rebuild():
                         self.rebuild()
+                        rebuild_triggered = True
 
-                return self.performance.end_operation(True)
+                return self.performance.end_operation(True, rebuild_triggered)
 
-            result = self._delete_from_overflow_chain(file, target_data_page_num, key_value)
-            return self.performance.end_operation(result)
+            result, rebuild_triggered = self._delete_from_overflow_chain(file, target_data_page_num, key_value)
+            return self.performance.end_operation(result, rebuild_triggered)
 
     def range_search(self, begin_key, end_key):
         self.performance.start_operation()
@@ -996,7 +913,9 @@ class ISAMPrimaryIndex:
         return self.performance.end_operation(sorted_results)
 
     def rebuild(self):
-        all_records = self._extract_all_records()
+        scan_result = self.scan_all()
+        all_records = scan_result.data
+        all_records.sort(key=lambda r: r.get_key())
 
         old_files = [self.filename, self.root_index_file, self.leaf_index_file]
         backup_files = [f + ".backup" for f in old_files]
@@ -1026,6 +945,9 @@ class ISAMPrimaryIndex:
             if os.path.exists(backup):
                 os.remove(backup)
 
+        return True
+
+
     # Funciones extras
 
     def _is_overflow_page(self, page_num):
@@ -1046,55 +968,6 @@ class ISAMPrimaryIndex:
                 return True
         except:
             return page_num > 0
-
-    def validate_index_consistency(self):
-        errors = []
-        files_to_check = [
-            (self.filename, "Archivo de datos"),
-            (self.leaf_index_file, "Archivo de índice Leaf"),
-            (self.root_index_file, "Archivo de índice Root")
-        ]
-        
-        for file_path, file_desc in files_to_check:
-            if not os.path.exists(file_path):
-                errors.append(f"{file_desc} no existe")
-        
-        if errors:
-            return errors
-        
-        try:
-
-            with open(self.root_index_file, "rb") as root_file:
-                root_index = self._read_root_index(root_file, 0)
-                
-                with open(self.leaf_index_file, "rb") as leaf_file:
-                    leaf_file_size = os.path.getsize(self.leaf_index_file)
-                    leaf_size = LeafIndex.HEADER_SIZE + self.leaf_index_block_factor * LeafIndexEntry.SIZE
-                    num_leaf_pages = leaf_file_size // leaf_size
-                    
-
-                    for root_entry in root_index.entries:
-                        if root_entry.leaf_page_number >= num_leaf_pages:
-                            errors.append(f"Root apunta a página Leaf inexistente: {root_entry.leaf_page_number}")
-                    
-
-                    with open(self.filename, "rb") as data_file:
-                        data_file_size = os.path.getsize(self.filename)
-                        page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
-                        num_data_pages = (data_file_size - self.DATA_START_OFFSET) // page_size
-                        
-                        for i in range(num_leaf_pages):
-                            leaf_index = self._read_leaf_index(leaf_file, i)
-                            for leaf_entry in leaf_index.entries:
-                                if leaf_entry.data_page_number >= num_data_pages:
-                                    errors.append(f"Leaf apunta a página de datos inexistente: {leaf_entry.data_page_number}")
-            
-
-                    
-        except Exception as e:
-            errors.append(f"Error durante validación: {str(e)}")
-        
-        return errors
 
     def show_structure(self):
         print("=== ESTRUCTURA DEL ISAM DE DOS NIVELES ===")
@@ -1135,16 +1008,18 @@ class ISAMPrimaryIndex:
 
         self.show_data_structure()
 
-    def scanAll(self):
+    def scan_all(self):
+        self.performance.start_operation()
+
         results = []
 
         if not os.path.exists(self.filename):
-            return results
+            return self.performance.end_operation(results)
 
         with open(self.filename, "rb") as file:
             file_size = os.path.getsize(self.filename)
             if file_size < self.DATA_START_OFFSET:
-                return results
+                return self.performance.end_operation(results)
 
             page_size = Page.HEADER_SIZE + self.block_factor * self.record_template.RECORD_SIZE
             num_pages = (file_size - self.DATA_START_OFFSET) // page_size
@@ -1161,7 +1036,7 @@ class ISAMPrimaryIndex:
                     results.extend(page.records)
                     current_page_num = page.next_page if page.next_page != -1 else None
 
-        return results
+        return self.performance.end_operation(results)
 
     def show_data_structure(self):
         print("\n--- DATA PAGES ---")
