@@ -1,146 +1,171 @@
 import math
-import pickle
 import os
 from rtree import index
-from typing import List, Tuple, Any, Optional
+from typing import List, Tuple, Optional
+from ..core.record import Record
+from ..core.performance_tracker import PerformanceTracker, OperationResult
 
-class RTree:
-    def __init__(self, dimension: int = 2, filename: str = None):
-        self.dimension = dimension
+class RTreeSecondaryIndex:
+    def __init__(self, field_name: str, primary_index, filename: str, dimension: int = 2):
+        self.field_name = field_name
+        self.primary_index = primary_index
         self.filename = filename
-
+        self.dimension = dimension
+        self.performance = PerformanceTracker()
+        
         p = index.Property()
-        p.dimension = dimension 
+        p.dimension = dimension
         if filename:
             self.idx = index.Index(filename, properties=p)
-            self.metadata_file = f"{filename}_metadata.pkl"
         else:
             self.idx = index.Index(properties=p)
-            self.metadata_file = None
     
-    def _load_all_metadata(self) -> dict:
-        if self.metadata_file and os.path.exists(self.metadata_file):
-            try:
-                with open(self.metadata_file, 'rb') as f:
-                    return pickle.load(f)
-            except Exception as e:
-                print(f"ERROR AL CARGAR METADATA: {e}")
-                return {}
-        return {}
-    
-    def _save_all_metadata(self, records: dict):
-        if self.metadata_file:
-            try:
-                with open(self.metadata_file, 'wb') as f:
-                    pickle.dump(records, f)
-            except Exception as e:
-                print(f"ERROR AL GUARDAR METADATA: {e}")
-    
-    def count(self) -> int:
-        records = self._load_all_metadata()
-        return len(records)
-    
-    def get_all_recs(self) -> List[dict]:
-        records = self._load_all_metadata()
-        return list(records.values())
-    
-    def search(self, id_record: int) -> Optional[dict]:
-        records = self._load_all_metadata()
-        return records.get(id_record)
-
-    def rangeSearch(self, punto: List[float], radio: float) -> List[dict]:
-        if radio < 0:
-            raise ValueError("EL RADIO DEBE SER MAYOR O IGUAL A 0")
-        
-        min_c = []
-        max_c = []
-        for coordeada in punto:
-            min_c.append(coordeada - radio)
-            max_c.append(coordeada + radio)
-        
-        caja = tuple(min_c + max_c)
-        id_vecinos = list(self.idx.intersection(caja))
-        vecinos_dentro_del_radio = []
-        
-        records = self._load_all_metadata()
-        
-        for id_record in id_vecinos:
-            record = records.get(id_record)
-            if record:
-                dist = self.distancia_euclidiana(tuple(punto), tuple(record['punto']))
-                if dist <= radio:
-                    resultado = record.copy()
-                    resultado['distancia'] = dist
-                    vecinos_dentro_del_radio.append(resultado)
-
-        return vecinos_dentro_del_radio
-
-    def KNN(self, punto: List[float], k: int) -> List[dict]:
-        if k <= 0:
-            raise ValueError("K DEBE SER MAYOR A 0")
-        
-        caja = self.punto_a_rectangulo(punto)
-        id_k_vecinos = list(self.idx.nearest(caja, k))
-        k_vecinos = []
-        
-        records = self._load_all_metadata()
-        
-        for id_record in id_k_vecinos:
-            record = records.get(id_record)
-            if record:
-                dist = self.distancia_euclidiana(tuple(punto), tuple(record['punto']))
-                resultado = record.copy()
-                resultado['distancia'] = dist
-                k_vecinos.append(resultado)
-
-        k_vecinos.sort(key=lambda x: x['distancia'])
-        return k_vecinos[:k]
-
-    def insert(self, id_record: int, punto: List[float], record) -> bool:
-        try: 
-            caja = self.punto_a_rectangulo(punto)
-            self.idx.insert(id_record, caja)
-            
-            records = self._load_all_metadata()
-            records[id_record] = {'id': id_record, 'punto': punto, 'record': record}
-            self._save_all_metadata(records)
-            
-            return True
-        except Exception as e:
-            print(f"ERROR AL AÑADIR: {e}")
-            return False
-
-    def delete(self, id_record: int) -> bool:
-        records = self._load_all_metadata()
-        record = records.get(id_record)
-        
-        if not record:
-            print("ERROR: EL ID NO EXISTE")
-            return False
+    def insert(self, record: Record) -> OperationResult:
+        self.performance.start_operation()
         
         try:
-            caja = self.punto_a_rectangulo(record['punto'])
-            self.idx.delete(id_record, caja)
-            del records[id_record]
-            self._save_all_metadata(records)
+            coords = getattr(record, self.field_name, None)
+            if coords is None:
+                coords = record.__dict__.get(self.field_name)
             
-            return True
+            if coords is None:
+                raise ValueError(f"Campo {self.field_name} no encontrado en el record")
+            
+            if not isinstance(coords, (list, tuple)):
+                raise ValueError(f"Campo {self.field_name} debe ser lista o tupla de coordenadas")
+            
+            if len(coords) != self.dimension:
+                raise ValueError(f"Campo {self.field_name} debe tener {self.dimension} dimensiones")
+            
+            coords = list(coords)
+            primary_key = record.get_key()
+            
+            bbox = tuple(coords + coords)
+            self.idx.insert(primary_key, bbox)
+            
+            self.performance.track_write()
+            return self.performance.end_operation(True)
+            
         except Exception as e:
-            print(f"ERROR AL ELIMINAR: {e}")
-            return False
-
-    def distancia_euclidiana(self, punto1: Tuple[float], punto2: Tuple[float]) -> float:
-        if len(punto1) != len(punto2):
-            raise ValueError("ERROR: LOS PUNTOS NO TIENEN LA MISMA DIMENSION")
-        suma = 0
-        for i in range(len(punto1)):
-            suma += (punto1[i] - punto2[i]) ** 2
-        return math.sqrt(suma)
-
-    def punto_a_rectangulo(self, punto: List[float]) -> Tuple:
-        if len(punto) != self.dimension:
-            raise ValueError(f"El punto debe tener {self.dimension} dimensiones")
-        return tuple(punto + punto)
-
+            print(f"ERROR AL INSERTAR EN RTREE: {e}")
+            return self.performance.end_operation(False)
+    
+    def search(self, value) -> OperationResult:
+        self.performance.start_operation()
+        
+        try:
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"Valor de búsqueda debe ser lista o tupla de coordenadas")
+            
+            if len(value) != self.dimension:
+                raise ValueError(f"Valor de búsqueda debe tener {self.dimension} dimensiones")
+            
+            bbox = tuple(list(value) + list(value))
+            candidate_ids = list(self.idx.intersection(bbox))
+            
+            self.performance.track_read()
+            return self.performance.end_operation(candidate_ids)
+            
+        except Exception as e:
+            print(f"ERROR AL BUSCAR EN RTREE: {e}")
+            return self.performance.end_operation([])
+    
+    def range_search(self, start_key, end_key) -> OperationResult:
+        raise NotImplementedError(
+            "Range search is not supported for R-Tree spatial indexes. "
+            "R-Tree is optimized for spatial queries. "
+            "Use radius_search(center, radius) or knn_search(coords, k) instead."
+        )
+    
+    def knn_search(self, coords: List[float], k: int) -> OperationResult:
+        self.performance.start_operation()
+        
+        try:
+            if not isinstance(coords, (list, tuple)) or len(coords) != self.dimension:
+                raise ValueError(f"Coordenadas deben tener {self.dimension} dimensiones")
+            
+            if k <= 0:
+                raise ValueError("k debe ser mayor que 0")
+            
+            bbox = tuple(list(coords) + list(coords))
+            nearest_pks = list(self.idx.nearest(bbox, k * 2))
+            
+            self.performance.track_read()
+            return self.performance.end_operation(nearest_pks)
+            
+        except Exception as e:
+            print(f"ERROR EN KNN SEARCH: {e}")
+            return self.performance.end_operation([])
+    
+    def radius_search(self, center: List[float], radius: float) -> OperationResult:
+        self.performance.start_operation()
+        
+        try:
+            if not isinstance(center, (list, tuple)) or len(center) != self.dimension:
+                raise ValueError(f"Centro debe tener {self.dimension} dimensiones")
+            
+            if radius < 0:
+                raise ValueError("Radio debe ser mayor o igual a 0")
+            
+            min_coords = [c - radius for c in center]
+            max_coords = [c + radius for c in center]
+            bbox = tuple(min_coords + max_coords)
+            
+            candidate_pks = list(self.idx.intersection(bbox))
+            
+            self.performance.track_read()
+            return self.performance.end_operation(candidate_pks)
+            
+        except Exception as e:
+            print(f"ERROR EN RADIUS SEARCH: {e}")
+            return self.performance.end_operation([])
+    
+    def delete(self, record: Record) -> OperationResult:
+        self.performance.start_operation()
+        
+        try:
+            primary_key = record.get_key()
+            
+            coords = getattr(record, self.field_name, None)
+            if coords is None:
+                raise ValueError(f"No se pudo obtener el campo {self.field_name} del record")
+            
+            if not isinstance(coords, (list, tuple)) or len(coords) != self.dimension:
+                raise ValueError(f"Coordenadas deben tener {self.dimension} dimensiones")
+            
+            bbox = tuple(list(coords) + list(coords))
+            self.idx.delete(primary_key, bbox)
+            
+            self.performance.track_write()
+            return self.performance.end_operation(True)
+            
+        except Exception as e:
+            print(f"ERROR AL ELIMINAR EN RTREE: {e}")
+            return self.performance.end_operation(False)
+    
+    def _euclidean_distance(self, p1: List[float], p2: List[float]) -> float:
+        if len(p1) != len(p2):
+            raise ValueError("Puntos deben tener la misma dimensión")
+        return math.sqrt(sum((p1[i] - p2[i]) ** 2 for i in range(len(p1))))
+    
+    def drop_index(self):
+        removed_files = []
+        
+        try:
+            self.idx.close()
+            
+            for ext in ['.dat', '.idx']:
+                filepath = f"{self.filename}{ext}"
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    removed_files.append(filepath)
+        except Exception as e:
+            print(f"ERROR AL ELIMINAR ARCHIVOS DEL ÍNDICE R-Tree: {e}")
+        
+        return removed_files
+    
     def close(self):
-        self.idx.close()
+        try:
+            self.idx.close()
+        except Exception as e:
+            print(f"ERROR AL CERRAR EL ÍNDICE R-Tree: {e}")

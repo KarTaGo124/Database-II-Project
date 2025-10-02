@@ -626,7 +626,20 @@ class DatabaseManager:
 
             return ExtendibleHashing(data_filename, field_name, field_type, field_size, is_primary=False)
         elif index_type == "RTREE":
-            raise NotImplementedError(f"R-Tree secondary index not implemented yet")
+            secondary_dir = os.path.join(self.base_dir, "secondary")
+            os.makedirs(secondary_dir, exist_ok=True)
+            
+            if field_type != "ARRAY":
+                raise ValueError(f"R-Tree indexes require ARRAY fields (spatial coordinates), got {field_type}")
+            
+            dimension = field_size
+            
+            table_info = self.tables[table.table_name]
+            primary_index = table_info["primary_index"]
+            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_rtree")
+            
+            from ..r_tree.r_tree import RTreeSecondaryIndex
+            return RTreeSecondaryIndex(field_name, primary_index, filename, dimension=dimension)
 
         raise NotImplementedError(f"Secondary index type {index_type} not implemented yet")
 
