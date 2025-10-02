@@ -21,10 +21,22 @@ class PerformanceTracker:
         self.reads = 0
         self.writes = 0
         self.start_time = 0
+        self.operation_stack = []
+        self.rebuild_occurred = False
 
     def start_operation(self):
-        self.reads = 0
-        self.writes = 0
+        if self.start_time != 0:
+            self.operation_stack.append({
+                'reads': self.reads,
+                'writes': self.writes,
+                'start_time': self.start_time,
+                'rebuild_occurred': self.rebuild_occurred
+            })
+        else:
+            self.reads = 0
+            self.writes = 0
+            self.rebuild_occurred = False
+
         self.start_time = time.time()
 
     def track_read(self):
@@ -35,4 +47,26 @@ class PerformanceTracker:
 
     def end_operation(self, result_data, rebuild_triggered=False):
         execution_time = (time.time() - self.start_time) * 1000
-        return OperationResult(result_data, execution_time, self.reads, self.writes, rebuild_triggered)
+
+        # Track if rebuild occurred in this operation or any nested operation
+        if rebuild_triggered:
+            self.rebuild_occurred = True
+
+        if self.operation_stack:
+            previous_state = self.operation_stack.pop()
+            total_reads = previous_state['reads'] + self.reads
+            total_writes = previous_state['writes'] + self.writes
+
+            # Combine rebuild flags from current and previous operations
+            combined_rebuild = self.rebuild_occurred or previous_state['rebuild_occurred']
+
+            self.reads = total_reads
+            self.writes = total_writes
+            self.start_time = previous_state['start_time']
+            self.rebuild_occurred = combined_rebuild
+
+            return OperationResult(result_data, execution_time, self.reads - previous_state['reads'], self.writes - previous_state['writes'], combined_rebuild)
+        else:
+            result = OperationResult(result_data, execution_time, self.reads, self.writes, self.rebuild_occurred)
+            self.reset()
+            return result
