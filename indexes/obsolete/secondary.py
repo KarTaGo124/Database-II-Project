@@ -1,6 +1,6 @@
 import os
 import struct
-from ..core.record import Record, IndexRecord
+from ..core.record import IndexRecord
 from ..core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 30
@@ -207,19 +207,15 @@ class ISAMSecondaryBase:
 
     # Operaciones principales
 
-    def insert(self, record: Record):
+    def insert(self, index_record: IndexRecord):
         self.performance.start_operation()
 
         try:
-            secondary_value = getattr(record, self.field_name)
-            primary_key = record.get_key()
-
-            index_record = self._create_index_record(secondary_value, primary_key)
-
             if not os.path.exists(self.filename):
                 self._create_initial_files(index_record)
                 return self.performance.end_operation(True)
 
+            secondary_value = index_record.index_value
             search_key = self._get_search_key(secondary_value)
             target_leaf_page_num = self._find_target_leaf_page(search_key, track_reads=True)
             target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num, track_reads=True)
@@ -295,44 +291,49 @@ class ISAMSecondaryBase:
 
         return self.performance.end_operation(primary_keys)
 
-    def delete(self, record: Record):
+    def delete(self, secondary_value, primary_key=None):
         self.performance.start_operation()
-        secondary_value = getattr(record, self.field_name)
-        primary_key = record.get_key()
 
-        result = self._delete_record(secondary_value, primary_key)
-        return self.performance.end_operation(result)
-
-    # Operaciones intermedias
-
-    def _delete_record(self, secondary_value, primary_key):
         if not os.path.exists(self.filename):
-            return False
+            return self.performance.end_operation([] if primary_key is None else False)
 
         search_key = self._get_search_key(secondary_value)
         target_leaf_page_num = self._find_target_leaf_page(search_key, track_reads=True)
         target_data_page_num = self._find_target_data_page(search_key, target_leaf_page_num, track_reads=True)
 
         current_page_num = target_data_page_num
+        deleted_pks = []
 
         with open(self.filename, "r+b") as file:
             while current_page_num is not None:
                 page = self._read_page(file, current_page_num)
 
-                original_count = len(page.records)
-                page.records = [r for r in page.records
-                              if not (self._values_equal(r.index_value, secondary_value) and r.primary_key == primary_key)]
+                if primary_key is None:
+                    records_to_delete = [r for r in page.records if self._values_equal(r.index_value, secondary_value)]
+                    deleted_pks.extend([r.primary_key for r in records_to_delete])
+                    page.records = [r for r in page.records if not self._values_equal(r.index_value, secondary_value)]
+                else:
+                    original_count = len(page.records)
+                    page.records = [r for r in page.records
+                                  if not (self._values_equal(r.index_value, secondary_value) and r.primary_key == primary_key)]
 
-                if len(page.records) < original_count:
-                    if page.is_empty() and current_page_num != 0:
-                        self.free_list_stack.push_free_page(current_page_num)
-                    else:
-                        self._write_page(file, current_page_num, page)
-                    return True
+                    if len(page.records) < original_count:
+                        deleted_pks.append(primary_key)
+
+                if page.is_empty() and current_page_num != 0:
+                    self.free_list_stack.push_free_page(current_page_num)
+                else:
+                    self._write_page(file, current_page_num, page)
+
+                if primary_key is not None and len(deleted_pks) > 0:
+                    break
 
                 current_page_num = page.next_page if page.next_page != -1 else None
 
-        return False
+        if primary_key is None:
+            return self.performance.end_operation(deleted_pks)
+        else:
+            return self.performance.end_operation(len(deleted_pks) > 0)
 
     # Escritura y lectura de páginas e índices
 
