@@ -5,7 +5,6 @@ from .performance_tracker import OperationResult
 from ..bplus_tree.bplus_tree_clustered import BPlusTreeClusteredIndex
 from ..bplus_tree.bplus_tree_unclustered import BPlusTreeUnclusteredIndex
 from ..isam.primary import ISAMPrimaryIndex
-from ..obsolete.secondary import ISAMSecondaryIndexINT, ISAMSecondaryIndexCHAR, ISAMSecondaryIndexFLOAT
 from ..extendible_hashing.extendible_hashing import ExtendibleHashing
 from ..sequential_file.sequential_file import SequentialFile
 
@@ -13,7 +12,7 @@ class DatabaseManager:
 
     INDEX_TYPES = {
         "SEQUENTIAL": {"primary": True, "secondary": False},
-        "ISAM": {"primary": True, "secondary": True},
+        "ISAM": {"primary": True, "secondary": False},
         "BTREE": {"primary": True, "secondary": True},
         "HASH": {"primary": False, "secondary": True},
         "RTREE": {"primary": False, "secondary": True}
@@ -774,24 +773,7 @@ class DatabaseManager:
     def _create_secondary_index(self, table: Table, field_name: str, index_type: str, csv_filename: str):
         field_type, field_size = self._get_field_info(table, field_name)
 
-        if index_type == "ISAM":
-
-            secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_isam_{field_name}")
-            os.makedirs(secondary_dir, exist_ok=True)
-
-            table_info = self.tables[table.table_name]
-            primary_index = table_info["primary_index"]
-            filename = os.path.join(secondary_dir, "datos.dat")
-
-            if field_type == "INT":
-                return ISAMSecondaryIndexINT(field_name, primary_index, filename)
-            elif field_type == "CHAR":
-                return ISAMSecondaryIndexCHAR(field_name, field_size, primary_index, filename)
-            elif field_type == "FLOAT":
-                return ISAMSecondaryIndexFLOAT(field_name, primary_index, filename)
-            else:
-                raise NotImplementedError(f"ISAM secondary index para tipo {field_type} no implementado")
-        elif index_type == "BTREE":
+        if index_type == "BTREE":
             secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_btree_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
 
