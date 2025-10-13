@@ -19,10 +19,9 @@ class DatabaseManager:
         "RTREE": {"primary": False, "secondary": True}
     }
 
-    def __init__(self, database_name: str = "default_db"):
-        self.database_name = database_name
+    def __init__(self, database_name: str = None):
         self.tables = {}
-        self.base_dir = os.path.join("data", "databases", database_name)
+        self.base_dir = os.path.join("data", "database")
         os.makedirs(self.base_dir, exist_ok=True)
 
     def create_table(self, table: Table, primary_index_type: str = "ISAM", csv_filename: str = None):
@@ -741,7 +740,7 @@ class DatabaseManager:
     def _create_primary_index(self, table: Table, index_type: str, csv_filename: str):
         if index_type == "ISAM":
 
-            primary_dir = os.path.join(self.base_dir, "primary")
+            primary_dir = os.path.join(self.base_dir, table.table_name, f"primary_isam_{table.key_field}")
             os.makedirs(primary_dir, exist_ok=True)
             primary_filename = os.path.join(primary_dir, "datos.dat")
 
@@ -749,7 +748,7 @@ class DatabaseManager:
 
         elif index_type == "SEQUENTIAL":
 
-            primary_dir = os.path.join(self.base_dir, "primary")
+            primary_dir = os.path.join(self.base_dir, table.table_name, f"primary_sequential_{table.key_field}")
             os.makedirs(primary_dir, exist_ok=True)
             main_filename = os.path.join(primary_dir, "main.dat")
             aux_filename = os.path.join(primary_dir, "aux.dat")
@@ -764,9 +763,9 @@ class DatabaseManager:
             return SequentialFile(main_filename, aux_filename, table_with_active)
 
         elif index_type == "BTREE":
-            primary_dir = os.path.join(self.base_dir, "primary")
+            primary_dir = os.path.join(self.base_dir, table.table_name, f"primary_btree_{table.key_field}")
             os.makedirs(primary_dir, exist_ok=True)
-            primary_filename = os.path.join(primary_dir, "btree_primary.pkl")
+            primary_filename = os.path.join(primary_dir, "datos.pkl")
             return BPlusTreeClusteredIndex(table, primary_filename, order=4)
 
 
@@ -777,12 +776,12 @@ class DatabaseManager:
 
         if index_type == "ISAM":
 
-            secondary_dir = os.path.join(self.base_dir, "secondary")
+            secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_isam_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
 
             table_info = self.tables[table.table_name]
             primary_index = table_info["primary_index"]
-            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_isam.dat")
+            filename = os.path.join(secondary_dir, "datos.dat")
 
             if field_type == "INT":
                 return ISAMSecondaryIndexINT(field_name, primary_index, filename)
@@ -793,20 +792,20 @@ class DatabaseManager:
             else:
                 raise NotImplementedError(f"ISAM secondary index para tipo {field_type} no implementado")
         elif index_type == "BTREE":
-            secondary_dir = os.path.join(self.base_dir, "secondary")
+            secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_btree_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
-            
+
             table_info = self.tables[table.table_name]
             primary_index = table_info["primary_index"]
-            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_btree.pkl")
-            
+            filename = os.path.join(secondary_dir, "datos.pkl")
+
             return BPlusTreeUnclusteredIndex(field_name, primary_index, filename, order=4)
         elif index_type == "HASH":
 
-            secondary_dir = os.path.join(self.base_dir, "secondary")
+            secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_hash_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
 
-            data_filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}")
+            data_filename = os.path.join(secondary_dir, "datos")
 
             return ExtendibleHashing(data_filename, field_name, field_type, field_size, is_primary=False)
         elif index_type == "RTREE":
