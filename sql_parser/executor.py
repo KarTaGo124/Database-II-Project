@@ -1,23 +1,24 @@
 import csv
 from typing import Dict, Any, List, Tuple, Optional
 from .plan_types import (
-    CreateTablePlan, LoadFromCSVPlan, SelectPlan, InsertPlan, DeletePlan,
+    CreateTablePlan, LoadDataPlan, SelectPlan, InsertPlan, DeletePlan,
     CreateIndexPlan, DropTablePlan, DropIndexPlan,
     ColumnDef, ColumnType, PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN
 )
 from indexes.core.record import Table, Record
 from indexes.core.performance_tracker import OperationResult
+from indexes.core.database_manager import DatabaseManager
 
 
 class Executor:
-    def __init__(self, db_manager):
+    def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
 
     def execute(self, plan):
         if isinstance(plan, CreateTablePlan):
             return self._create_table(plan)
-        elif isinstance(plan, LoadFromCSVPlan):
-            return self._create_from_file(plan)
+        elif isinstance(plan, LoadDataPlan):
+            return self._load_data(plan)
         elif isinstance(plan, SelectPlan):
             return self._select(plan)
         elif isinstance(plan, InsertPlan):
@@ -197,19 +198,15 @@ class Executor:
                 continue
         return mapping
 
-    # ====== CSV LOAD ======
-    def _create_from_file(self, plan: LoadFromCSVPlan):
+    # ====== LOAD DATA FROM FILE ======
+    def _load_data(self, plan: LoadDataPlan):
         info = self.db.get_table_info(plan.table)
         if not info:
-            raise ValueError(f"Tabla {plan.table} no existe; crea la tabla antes de cargar CSV")
+            raise ValueError(f"Tabla {plan.table} no existe; crea la tabla primero con CREATE TABLE")
 
         table_obj = self.db.tables[plan.table]["table"]
         phys_fields = table_obj.all_fields
         key_field = table_obj.key_field
-
-        phys_index: Dict[str, Tuple[str, str, int]] = {
-            name.lower(): (name, ftype, fsize) for (name, ftype, fsize) in phys_fields
-        }
 
         inserted = duplicates = cast_err = 0
 
@@ -218,37 +215,40 @@ class Executor:
             delimiter = self._guess_delimiter(first_line)
 
         with open(plan.filepath, "r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f, delimiter=delimiter)
-            if not reader.fieldnames:
-                return "CSV cargado: insertados=0, duplicados=0, cast_err=0"
+            reader = csv.reader(f, delimiter=delimiter)
+            header = next(reader, None)
+            if not header:
+                return OperationResult("CSV vacío: insertados=0", 0, 0, 0)
 
-            header_map = self._spanish_header_mapping(reader.fieldnames)
+            # Excluir campos internos (active, etc) que no vienen del CSV
+            user_fields = [(name, ftype, fsize) for (name, ftype, fsize) in phys_fields
+                          if name not in ['active']]
 
-            for row in reader:
-                row_lower = {(k or "").strip().lower(): v for k, v in row.items()}
+            for row_values in reader:
+                if len(row_values) != len(user_fields):
+                    cast_err += 1
+                    continue
+
                 rec = Record(phys_fields, key_field)
                 ok_row = True
 
-                for name_lower, (phys_name, ftype, _fsize) in phys_index.items():
+                # Llenar campos del usuario desde CSV
+                for idx, (field_name, field_type, _) in enumerate(user_fields):
                     try:
-                        raw = None
-                        if name_lower in row_lower:
-                            raw = row_lower[name_lower]
-                        else:
-                            raw = None
-                            for h_sp_lower, phys in header_map.items():
-                                if phys == phys_name and h_sp_lower in row_lower:
-                                    raw = row_lower[h_sp_lower]
-                                    break
+                        raw = row_values[idx] if idx < len(row_values) else None
 
-                        if phys_name == "fecha":
+                        if field_type == "CHAR" and field_name == "fecha":
                             raw = self._cast_date_ddmmyyyy_to_iso(str(raw) if raw is not None else "")
 
-                        val = self._cast_value(raw, ftype)
-                        rec.set_field_value(phys_name, val)
-                    except Exception:
+                        val = self._cast_value(raw, field_type)
+                        rec.set_field_value(field_name, val)
+                    except Exception as e:
                         ok_row = False
                         break
+
+                # Setear campos internos con defaults
+                if 'active' in [name for (name, _, _) in phys_fields]:
+                    rec.set_field_value('active', True)
 
                 if not ok_row:
                     cast_err += 1
@@ -260,11 +260,11 @@ class Executor:
                         duplicates += 1
                     else:
                         inserted += 1
-                except Exception:
+                except Exception as e:
                     cast_err += 1
                     continue
 
-        return f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}"
+        return OperationResult(f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}", 0, 0, 0)
 
     # ====== SELECT ======
     def _get_ftype(self, table: str, col: str) -> Optional[str]:
@@ -287,7 +287,10 @@ class Executor:
             for c in pick:
                 val = getattr(r, c, None)
                 if isinstance(val, bytes):
-                    val = val.decode("utf-8").rstrip("\x00").strip()
+                    try:
+                        val = val.decode("utf-8").rstrip("\x00").strip()
+                    except UnicodeDecodeError:
+                        val = val.decode("utf-8", errors="replace").rstrip("\x00").strip()
                 obj[c] = val
             out.append(obj)
         return out
@@ -418,25 +421,25 @@ class Executor:
     def _create_index(self, plan: CreateIndexPlan):
         try:
             if not self.db._validate_secondary_index(plan.index_type.upper()):
-                return f"ERROR: Tipo de índice '{plan.index_type}' no soportado para índices secundarios"
+                return OperationResult(f"ERROR: Tipo de índice '{plan.index_type}' no soportado", 0, 0, 0)
 
             self.db.create_index(plan.table, plan.column, plan.index_type.upper())
-            return f"OK: Índice creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}"
+            return OperationResult(f"OK: Índice creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}", 0, 0, 0)
         except Exception as e:
-            return f"ERROR: {e}"
+            return OperationResult(f"ERROR: {e}", 0, 0, 0)
 
     # ====== DROP TABLE ======
     def _drop_table(self, plan: DropTablePlan):
         try:
             if plan.table not in self.db.tables:
-                return f"ERROR: Tabla '{plan.table}' no existe"
+                return OperationResult(f"ERROR: Tabla '{plan.table}' no existe", 0, 0, 0)
 
             removed_files = self.db.drop_table(plan.table)
             files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
 
-            return f"OK: Tabla '{plan.table}' eliminada{files_info}"
+            return OperationResult(f"OK: Tabla '{plan.table}' eliminada{files_info}", 0, 0, 0)
         except Exception as e:
-            return f"ERROR: {e}"
+            return OperationResult(f"ERROR: {e}", 0, 0, 0)
 
     # ====== DROP INDEX ======
     def _drop_index(self, plan: DropIndexPlan):
@@ -447,8 +450,8 @@ class Executor:
                 if "secondary_indexes" in table_data and field_name in table_data["secondary_indexes"]:
                     removed_files = self.db.drop_index(table_name, field_name)
                     files_info = f" (archivos eliminados: {len(removed_files)})" if removed_files else ""
-                    return f"OK: Índice eliminado en campo '{field_name}'{files_info}"
+                    return OperationResult(f"OK: Índice eliminado en campo '{field_name}'{files_info}", 0, 0, 0)
 
-            return f"ERROR: Índice '{plan.index_name}' no encontrado"
+            return OperationResult(f"ERROR: Índice '{plan.index_name}' no encontrado", 0, 0, 0)
         except Exception as e:
-            return f"ERROR: {e}"
+            return OperationResult(f"ERROR: {e}", 0, 0, 0)

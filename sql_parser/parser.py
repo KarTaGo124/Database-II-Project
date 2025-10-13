@@ -1,6 +1,6 @@
 from .plan_types import (
     ColumnType, ColumnDef,
-    CreateTablePlan, LoadFromCSVPlan,
+    CreateTablePlan, LoadDataPlan,
     SelectPlan, InsertPlan, DeletePlan,
     CreateIndexPlan, DropTablePlan, DropIndexPlan,
     PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN,
@@ -103,22 +103,11 @@ class _T(Transformer):
         columns = items[1:]
         return CreateTablePlan(table=table, columns=columns)
 
-    # ==== CREATE FROM FILE ====
-    def create_from_file(self, items):
-        table = _tok2str(items[0])
-        filepath = self.ident_or_string([items[1]])  # asegura string limpio
-        idx_kind = str(items[2])
-
-        cols: List[str] = []
-        for it in items[3:]:
-            if isinstance(it, list):
-                cols.extend([_tok2str(x) for x in it])
-            else:
-                cols.append(_tok2str(it))
-        if not cols:
-            cols = None
-
-        return LoadFromCSVPlan(table=table, filepath=filepath, index_kind=idx_kind, index_cols=cols)
+    # ==== LOAD DATA FROM FILE ====
+    def load_data(self, items):
+        filepath = self.ident_or_string([items[0]])
+        table = _tok2str(items[1])
+        return LoadDataPlan(table=table, filepath=filepath)
 
     # ==== SELECT ====
     def select_all(self, _): return None
