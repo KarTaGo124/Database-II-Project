@@ -1,6 +1,6 @@
 from typing import Any, List, Optional, Tuple, Union
 import bisect
-
+import pickle
 import os
 import time
 from ..core.record import Record
@@ -46,24 +46,169 @@ class BPlusTreeClusteredIndex:
         # Performance tracking
         self.performance = PerformanceTracker()
         
-        self.pages = {}
+        # Disk-based storage - SINGLE FILE for all pages (like real DBMS)
+        self.data_file = file_path + ".dat"  # Single binary file for all pages
+        self.page_size = 4096  # Standard 4KB page size (like PostgreSQL, MySQL)
+        
         self.next_page_id = 1
         self.root_page_id = 0
         self.root.id = 0
-        self.pages[0] = self.root
+        
+        # Initialize empty file if it doesn't exist
+        if not os.path.exists(self.data_file):
+            with open(self.data_file, 'wb') as f:
+                f.write(b'\x00' * self.page_size)  # Write empty root page
+        
+        # Save initial root page to disk immediately
+        self.write_page(0, self.root)
         
     
     def load_page(self, page_id: int) -> Node:
+        """Load a page from disk - SINGLE FILE with page offset (like real DBMS)"""
         self.performance.track_read()
-                
-        if page_id in self.pages:
-            return self.pages[page_id]
         
-        return None
+        # Simulate realistic disk I/O delay
+        time.sleep(0.001)
+        
+        if not os.path.exists(self.data_file):
+            return None
+            
+        try:
+            # Calculate offset: page_id * page_size
+            offset = page_id * self.page_size
+            
+            with open(self.data_file, 'rb') as f:
+                f.seek(offset)  # Seek to page position
+                page_data = f.read(self.page_size)  # Read exactly one page
+                
+                # Check if page is empty (all zeros)
+                if page_data == b'\x00' * self.page_size:
+                    return None
+                
+                # Find actual data end (remove padding zeros)
+                actual_end = len(page_data.rstrip(b'\x00'))
+                if actual_end == 0:
+                    return None
+                    
+                # Deserialize page data
+                node_data = pickle.loads(page_data[:actual_end])
+                
+            # Reconstruct the node from binary data
+            if node_data['is_leaf']:
+                node = ClusteredLeafNode()
+                node.keys = node_data['keys']
+                node.records = node_data['records']  # Records preserved by pickle
+                node.previous = node_data.get('previous')
+                node.next = node_data.get('next')
+            else:
+                node = ClusteredInternalNode()
+                node.keys = node_data['keys']
+                node.children = node_data['children']
+                
+            node.id = node_data['id']
+            node.parent = node_data.get('parent')
+            
+            return node
+            
+        except Exception as e:
+            print(f"Error loading page {page_id}: {e}")
+            return None
     
     def write_page(self, page_id: int, page: Node):
-        self.performance.track_write()        
-        self.pages[page_id] = page
+        """Write a page to disk - SINGLE FILE with page offset (like real DBMS)"""
+        self.performance.track_write()
+        
+        # Simulate realistic disk I/O delay  
+        time.sleep(0.001)
+        
+        try:
+            page_data = {
+                'id': page.id,
+                'is_leaf': page.is_leaf,
+                'keys': page.keys,
+                'parent': page.parent.id if page.parent else None
+            }
+            
+            if isinstance(page, ClusteredLeafNode):
+                page_data['records'] = page.records
+                page_data['previous'] = page.previous.id if page.previous else None
+                page_data['next'] = page.next.id if page.next else None
+            else:
+                page_data['children'] = [child.id if hasattr(child, 'id') else child for child in page.children]
+                
+            # Serialize page data
+            serialized_data = pickle.dumps(page_data, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            # Check if data fits in page size
+            if len(serialized_data) > self.page_size:
+                raise Exception(f"Page data too large: {len(serialized_data)} > {self.page_size}")
+            
+            # Pad with zeros to fill exactly one page
+            padded_data = serialized_data + b'\x00' * (self.page_size - len(serialized_data))
+            
+            # Calculate offset and write to specific position
+            offset = page_id * self.page_size
+            
+            # Extend file if necessary
+            if not os.path.exists(self.data_file):
+                with open(self.data_file, 'wb') as f:
+                    f.write(b'\x00' * self.page_size)
+            
+            # Check current file size and extend if needed
+            current_size = os.path.getsize(self.data_file)
+            required_size = (page_id + 1) * self.page_size
+            
+            if current_size < required_size:
+                with open(self.data_file, 'ab') as f:
+                    f.write(b'\x00' * (required_size - current_size))
+            
+            # Write the page at the correct offset
+            with open(self.data_file, 'r+b') as f:
+                f.seek(offset)
+                f.write(padded_data)
+                f.flush()  # Ensure data is written to disk
+                
+        except Exception as e:
+            print(f"Error writing page {page_id}: {e}")
+    
+    def delete_page(self, page_id: int):
+        """Mark a page as deleted by writing zeros (like real DBMS)"""
+        try:
+            offset = page_id * self.page_size
+            
+            if os.path.exists(self.data_file):
+                with open(self.data_file, 'r+b') as f:
+                    f.seek(offset)
+                    f.write(b'\x00' * self.page_size)  # Zero out the page
+                    f.flush()
+        except Exception as e:
+            print(f"Error deleting page {page_id}: {e}")
+    
+    def get_total_pages(self) -> int:
+        """Count total pages in the data file"""
+        if not os.path.exists(self.data_file):
+            return 0
+        
+        file_size = os.path.getsize(self.data_file)
+        return file_size // self.page_size
+    
+    def get_file_info(self) -> dict:
+        """Get information about the data file"""
+        if not os.path.exists(self.data_file):
+            return {"exists": False}
+        
+        file_size = os.path.getsize(self.data_file)
+        total_pages = file_size // self.page_size
+        
+        return {
+            "exists": True,
+            "file_path": self.data_file,
+            "file_size_bytes": file_size,
+            "file_size_kb": file_size / 1024,
+            "page_size": self.page_size,
+            "total_pages": total_pages,
+            "used_space_ratio": f"{(self.next_page_id / total_pages * 100):.1f}%" if total_pages > 0 else "0%"
+        }
             
     def search(self, key: Any) -> Optional[Record]:
         leaf_node = self.find_leaf_node(key)
@@ -128,8 +273,8 @@ class BPlusTreeClusteredIndex:
                 self.root.parent = None
                 self.root_page_id = self.root.id
                 
-                if old_root_id in self.pages:
-                    del self.pages[old_root_id]
+                if old_root_id is not None:
+                    self.delete_page(old_root_id)
         return True
 
     def handle_leaf_underflow(self, leaf: ClusteredLeafNode):
@@ -204,8 +349,7 @@ class BPlusTreeClusteredIndex:
         parent.keys.pop(leaf_index - 1)
         
         # remove leaf from pages
-        if leaf.id in self.pages:
-            del self.pages[leaf.id]
+        self.delete_page(leaf.id)
         
         # handle parent underflow
         if parent != self.root and parent.is_underflow(self.min_keys):
@@ -226,9 +370,8 @@ class BPlusTreeClusteredIndex:
         parent.children.pop(leaf_index + 1)
         parent.keys.pop(leaf_index)
         
-        # remove right sibling from pages
-        if right_sibling.id in self.pages:
-            del self.pages[right_sibling.id]
+        # remove right sibling from disk
+        self.delete_page(right_sibling.id)
         
         # handle parent underflow
         if parent != self.root and parent.is_underflow(self.min_keys):
@@ -299,8 +442,7 @@ class BPlusTreeClusteredIndex:
         parent.children.pop(internal_index)
         parent.keys.pop(internal_index - 1)
         
-        if internal.id in self.pages:
-            del self.pages[internal.id]
+        self.delete_page(internal.id)
         
         if parent != self.root and parent.is_underflow(self.min_keys):
             self.handle_internal_underflow(parent)
@@ -319,8 +461,7 @@ class BPlusTreeClusteredIndex:
         parent.children.pop(internal_index + 1)
         parent.keys.pop(internal_index)
         
-        if right_sibling.id in self.pages:
-            del self.pages[right_sibling.id]
+        self.delete_page(right_sibling.id)
         
         if parent != self.root and parent.is_underflow(self.min_keys):
             self.handle_internal_underflow(parent)
@@ -449,7 +590,7 @@ class BPlusTreeClusteredIndex:
             "order": self.order,
             "max_keys": self.max_keys,
             "min_keys": self.min_keys,
-            "total_pages": len(self.pages),
+            "total_pages": self.get_total_pages(),
             "root_page_id": self.root_page_id,
         }
         return stats
