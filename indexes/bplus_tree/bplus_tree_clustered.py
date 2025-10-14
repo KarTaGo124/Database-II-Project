@@ -46,9 +46,8 @@ class BPlusTreeClusteredIndex:
         # Performance tracking
         self.performance = PerformanceTracker()
         
-        # Disk-based storage - SINGLE FILE for all pages (like real DBMS)
-        self.data_file = file_path + ".dat"  # Single binary file for all pages
-        self.page_size = 4096  # Standard 4KB page size (like PostgreSQL, MySQL)
+        self.data_file = file_path + ".dat" 
+        self.page_size = 4096  
         
         self.next_page_id = 1
         self.root_page_id = 0
@@ -64,7 +63,6 @@ class BPlusTreeClusteredIndex:
         
     
     def load_page(self, page_id: int) -> Node:
-        """Load a page from disk - SINGLE FILE with page offset (like real DBMS)"""
         self.performance.track_read()
         
         # Simulate realistic disk I/O delay
@@ -552,7 +550,7 @@ class BPlusTreeClusteredIndex:
             # Check if parent is now full
             if parent.is_full(self.max_keys):
                 self.split_internal(parent)
-                
+                BPlusTreeClusteredIndex
     def find_leaf_node(self, key: Any) -> ClusteredLeafNode:
         current = self.load_page(self.root_page_id)
         while isinstance(current, ClusteredInternalNode):
