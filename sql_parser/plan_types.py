@@ -23,11 +23,9 @@ class CreateTablePlan:
     columns: List[ColumnDef]
 
 @dataclass
-class LoadFromCSVPlan:
+class LoadDataPlan:
     table: str
     filepath: str
-    index_kind: str           # por ejemplo: "ISAM"
-    index_cols: List[str]     # por ejemplo: ["id"] o ["(id","nombre)"] ya normalizados a ["id","nombre"]
 
 @dataclass
 class PredicateEq:
