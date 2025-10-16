@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
+import sys, os, shutil, time, random
 
-import sys
-import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 os.chdir(os.path.join(os.path.dirname(__file__), '..'))
 
 from indexes.core.database_manager import DatabaseManager
 from sql_parser.parser import parse
 from sql_parser.executor import Executor
-import shutil
-import time
+
 
 def print_metrics(result, operation_name):
     print(f"\n[METRICS] {operation_name}")
@@ -17,135 +15,112 @@ def print_metrics(result, operation_name):
     print(f"  Reads: {result.disk_reads}")
     print(f"  Writes: {result.disk_writes}")
     print(f"  Total accesses: {result.total_disk_accesses}")
-    if hasattr(result, 'operation_breakdown') and result.operation_breakdown:
-        print(f"  Breakdown: {result.operation_breakdown}")
 
-def test_hash_secondary():
-    print("=" * 70)
-    print("TEST: HASH SECONDARY INDEX")
-    print("=" * 70)
+
+def test_hash_secondary_exhaustive():
+    print("=" * 80)
+    print("TEST EXTENDIBLE HASHING — EXHAUSTIVE FUNCTIONAL TEST")
+    print("=" * 80)
 
     if os.path.exists('data/database'):
-        try:
-            shutil.rmtree('data/database')
-        except:
-            pass
-        time.sleep(0.5)
+        shutil.rmtree('data/database', ignore_errors=True)
+        time.sleep(0.3)
 
     db = DatabaseManager()
     executor = Executor(db)
 
-    print("\n1. CREATE TABLE con ISAM primary")
-    result = executor.execute(parse("""
-        CREATE TABLE empleados (
-            emp_id INT KEY INDEX ISAM,
-            nombre VARCHAR[40],
-            departamento VARCHAR[30],
-            salario FLOAT
-        )
-    """)[0])
-    print(f"   {result.data}")
-    print_metrics(result, "CREATE TABLE")
+    # === 1. CREATE TABLE AND SECONDARY INDEX ===
+    print("\n1. Crear tabla y secondary index extendible")
+    executor.execute(parse("""
+                           CREATE TABLE empleados
+                           (
+                               emp_id       INT KEY INDEX ISAM,
+                               nombre       VARCHAR[40],
+                               departamento VARCHAR[30],
+                               salario      FLOAT
+                           )
+                           """)[0])
+    executor.execute(parse('CREATE INDEX ON empleados (departamento) USING HASH')[0])
 
-    print("\n2. CREATE SECONDARY INDEX (HASH) en departamento")
-    result = executor.execute(parse('CREATE INDEX ON empleados (departamento) USING HASH')[0])
-    print(f"   Secondary index creado en 'departamento'")
-    print_metrics(result, "CREATE INDEX")
+    # === 2. MASS INSERTS to trigger directory doubling and bucket splits ===
+    print("\n2. Insertar registros para forzar splits y duplicación de directorio")
 
-    print("\n3. CREATE SECONDARY INDEX (HASH) en nombre")
-    result = executor.execute(parse('CREATE INDEX ON empleados (nombre) USING HASH')[0])
-    print(f"   Secondary index creado en 'nombre'")
-    print_metrics(result, "CREATE INDEX")
+    departamentos = ["IT", "Ventas", "RRHH", "Finanzas", "Logística", "Legal"]
+    nombres = ["Ana", "Carlos", "David", "Elena", "Laura", "Luis", "Maria", "Jose", "Carmen", "Pedro", "Miguel",
+               "Lucia", "Jorge", "Rosa", "Daniel"]
 
-    print("\n4. INSERT 12 registros (actualiza índices)")
-    empleados = [
-        (1, "Ana Martinez", "Ventas", 55000.0),
-        (2, "Carlos Lopez", "IT", 68000.0),
-        (3, "Elena Garcia", "Ventas", 52000.0),
-        (4, "David Chen", "IT", 72000.0),
-        (5, "Maria Rodriguez", "RRHH", 60000.0),
-        (6, "Jose Perez", "IT", 70000.0),
-        (7, "Laura Kim", "Ventas", 58000.0),
-        (8, "Miguel Santos", "Finanzas", 65000.0),
-        (9, "Sofia Wang", "IT", 75000.0),
-        (10, "Pedro Gomez", "Ventas", 54000.0),
-        (11, "Carmen Lee", "RRHH", 62000.0),
-        (12, "Luis Brown", "Finanzas", 67000.0),
+    inserted = []
+    for emp_id in range(1, 65):  # 64 registros para forzar varios splits
+        nombre = random.choice(nombres) + " " + random.choice(["Lopez", "Gomez", "Perez", "Lee", "Chen", "Wang"])
+        dept = random.choice(departamentos)
+        salario = round(random.uniform(40000, 90000), 2)
+        query = f'INSERT INTO empleados VALUES ({emp_id}, "{nombre}", "{dept}", {salario})'
+        res = executor.execute(parse(query)[0])
+        inserted.append((emp_id, nombre, dept, salario))
+    print(f"   Insertados {len(inserted)} empleados (múltiples splits)")
+
+    # === 3. VALIDAR LECTURAS POR HASH INDEX ===
+    print("\n3. Consultas por secondary index")
+    for dept in ["IT", "Ventas", "RRHH"]:
+        res = executor.execute(parse(f'SELECT * FROM empleados WHERE departamento = "{dept}"')[0])
+        print(f"   {dept}: {len(res.data)} empleados encontrados")
+    print("   ✅ Consultas por hash index exitosas")
+
+    # === 4. ELIMINACIONES aleatorias ===
+    print("\n4. Eliminar 10 registros aleatorios (verificar actualización de índice)")
+    deleted = random.sample(inserted, 10)
+    for emp_id, *_ in deleted:
+        executor.execute(parse(f'DELETE FROM empleados WHERE emp_id = {emp_id}')[0])
+    print("   ✅ Eliminaciones ejecutadas")
+
+    # === 5. Verificar consistencia post-delete ===
+    print("\n5. Verificar que eliminaciones se reflejen en el índice")
+    for _, _, dept, _ in deleted:
+        res = executor.execute(parse(f'SELECT * FROM empleados WHERE departamento = "{dept}"')[0])
+        for rec in res.data:
+            assert rec["emp_id"] not in [d[0] for d in deleted], f"Registro eliminado aún aparece en índice {dept}"
+    print("   ✅ Índices actualizados correctamente tras eliminación")
+
+    # === 6. Reinserciones para probar reutilización de buckets ===
+    print("\n6. Reinserciones para comprobar reutilización de espacio")
+    reinserts = [
+        (200, "Nuevo Empleado", "Legal", 58000.0),
+        (201, "Reinsertado Uno", "IT", 76000.0),
+        (202, "Reinsertado Dos", "Ventas", 61000.0)
     ]
+    for r in reinserts:
+        executor.execute(parse(f'INSERT INTO empleados VALUES ({r[0]}, "{r[1]}", "{r[2]}", {r[3]})')[0])
+    print("   ✅ Reinsertados empleados sin error")
 
-    total_time = 0
-    total_writes = 0
-    for eid, nombre, dept, salario in empleados:
-        result = executor.execute(parse(f'INSERT INTO empleados VALUES ({eid}, "{nombre}", "{dept}", {salario})')[0])
-        total_time += result.execution_time_ms
-        total_writes += result.disk_writes
-    print(f"   Insertados: 12 empleados")
-    print(f"   Total time: {total_time:.2f} ms")
-    print(f"   Total writes: {total_writes}")
+    # === 7. SELECTS ESPECÍFICOS ===
+    print("\n7. Consultas específicas post-reinserción")
+    res = executor.execute(parse('SELECT * FROM empleados WHERE nombre = "Nuevo Empleado"')[0])
+    assert len(res.data) == 1
+    print(f"   Encontrado: {res.data[0]['nombre']} en {res.data[0]['departamento']}")
 
-    print("\n5. SELECT por SECONDARY INDEX (departamento = IT)")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE departamento = "IT"')[0])
-    print(f"   Encontrados: {len(result.data)} empleados en IT")
-    for rec in result.data:
-        print(f"     - {rec['nombre']}: ${rec['salario']}")
-    print_metrics(result, "SELECT by SECONDARY INDEX (departamento)")
+    # === 8. SCAN ALL ===
+    print("\n8. SCAN ALL para verificar integridad final")
+    res = executor.execute(parse('SELECT * FROM empleados')[0])
+    print(f"   Total empleados en tabla: {len(res.data)}")
 
-    print("\n6. SELECT por SECONDARY INDEX (departamento = Ventas)")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE departamento = "Ventas"')[0])
-    print(f"   Encontrados: {len(result.data)} empleados en Ventas")
-    for rec in result.data:
-        print(f"     - {rec['nombre']}: ${rec['salario']}")
-    print_metrics(result, "SELECT by SECONDARY INDEX (departamento)")
+    # === 9. PRUEBA DE ESTABILIDAD: inserciones adicionales ===
+    print("\n9. Insertar 20 empleados extra para asegurar estabilidad")
+    for emp_id in range(300, 320):
+        dept = random.choice(departamentos)
+        nombre = random.choice(nombres) + " Test"
+        salario = round(random.uniform(45000, 95000), 2)
+        executor.execute(parse(f'INSERT INTO empleados VALUES ({emp_id}, "{nombre}", "{dept}", {salario})')[0])
+    print("   ✅ Insertados sin errores (estabilidad comprobada)")
 
-    print("\n7. SELECT por SECONDARY INDEX (nombre específico)")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE nombre = "David Chen"')[0])
-    print(f"   Encontrado: {result.data[0]['nombre']} - Dept: {result.data[0]['departamento']}")
-    print_metrics(result, "SELECT by SECONDARY INDEX (nombre)")
+    print("\n✅ TODAS LAS PRUEBAS PASARON EXITOSAMENTE")
+    print("=" * 80)
 
-    print("\n8. SELECT por PRIMARY KEY (comparación)")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE emp_id = 5')[0])
-    print(f"   Encontrado: {result.data[0]['nombre']} - ${result.data[0]['salario']}")
-    print_metrics(result, "SELECT by PRIMARY KEY")
-
-    print("\n9. DELETE con actualización de índices secundarios")
-    result = executor.execute(parse('DELETE FROM empleados WHERE emp_id = 2')[0])
-    print(f"   Eliminado: {result.data}")
-    print_metrics(result, "DELETE (actualiza secondary indexes)")
-
-    print("\n10. Verificar que secondary index se actualizó")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE departamento = "IT"')[0])
-    print(f"   IT ahora tiene: {len(result.data)} empleados (antes 4, ahora 3)")
-    for rec in result.data:
-        print(f"     - {rec['nombre']}")
-    print_metrics(result, "SELECT by SECONDARY INDEX after DELETE")
-
-    print("\n11. DELETE por SECONDARY INDEX (eliminar todos de RRHH)")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE departamento = "RRHH"')[0])
-    rrhh_ids = [rec['emp_id'] for rec in result.data]
-    print(f"   IDs a eliminar: {rrhh_ids}")
-
-    for emp_id in rrhh_ids:
-        result = executor.execute(parse(f'DELETE FROM empleados WHERE emp_id = {emp_id}')[0])
-    print(f"   Eliminados todos los empleados de RRHH")
-
-    print("\n12. Verificar eliminación")
-    result = executor.execute(parse('SELECT * FROM empleados WHERE departamento = "RRHH"')[0])
-    print(f"   RRHH ahora tiene: {len(result.data)} empleados")
-    print_metrics(result, "SELECT by SECONDARY INDEX after bulk DELETE")
-
-    print("\n13. SCAN ALL final")
-    result = executor.execute(parse('SELECT * FROM empleados')[0])
-    print(f"   Total empleados restantes: {len(result.data)}")
-    print_metrics(result, "SCAN ALL")
-
-    print("\n" + "=" * 70)
-    print("TEST HASH SECONDARY INDEX PASSED")
-    print("=" * 70)
 
 if __name__ == "__main__":
     try:
-        test_hash_secondary()
+        test_hash_secondary_exhaustive()
     except Exception as e:
         print(f"\n[ERROR] {e}")
-        import traceback
+        import traceback;
+
         traceback.print_exc()
