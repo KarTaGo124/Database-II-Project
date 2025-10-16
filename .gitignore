@@ -44,6 +44,7 @@ Thumbs.db
 *.dir
 *.pkl
 *.mapping
+*.idx
 
 # Temporary files
 *.tmp
