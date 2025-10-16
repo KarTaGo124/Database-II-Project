@@ -280,41 +280,60 @@ class ExtendibleHashing:
                 return self._split_bucket(head_bucket, index_record, dirfile, bucketfile)
 
     def _handle_empty_bucket(self, empty_bucket, dirfile, bucketfile):
-        self._redirect_directory_entries(empty_bucket, dirfile)
+        self._redirect_directory_entries(empty_bucket, dirfile,bucketfile)
         self.free_bucket(empty_bucket.bucket_pos, bucketfile)
 
-    def _redirect_directory_entries(self, empty_bucket, dirfile):
+    def _redirect_directory_entries(self, empty_bucket, dirfile, bucketfile):
         dir_size = 2 ** self.global_depth
+        header_offset = self.HEADER_SIZE
 
         empty_index = None
         for i in range(dir_size):
-            dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+            dirfile.seek(header_offset + i * self.DIR_SIZE)
             pos = struct.unpack(self.DIR_FORMAT, dirfile.read(self.DIR_SIZE))[0]
             self.performance.track_read()
-
             if pos == empty_bucket.bucket_pos:
                 empty_index = i
                 break
 
         if empty_index is None:
-            return  # no se encontró referencia, nada que hacer
+            return  # no directory entry found — nothing to redirect
 
-        # El hermano difiere solo en el bit menos significativo de la local depth
         mask = 1 << (empty_bucket.local_depth - 1)
-        sibling_index = empty_index ^ mask  # XOR para invertir ese bit
+        sibling_index = empty_index ^ mask
 
-        dirfile.seek(self.HEADER_SIZE + sibling_index * self.DIR_SIZE)
+        dirfile.seek(header_offset + sibling_index * self.DIR_SIZE)
         sibling_pos = struct.unpack(self.DIR_FORMAT, dirfile.read(self.DIR_SIZE))[0]
         self.performance.track_read()
 
         for i in range(dir_size):
-            dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+            dirfile.seek(header_offset + i * self.DIR_SIZE)
             pos = struct.unpack(self.DIR_FORMAT, dirfile.read(self.DIR_SIZE))[0]
             self.performance.track_read()
 
             if pos == empty_bucket.bucket_pos:
-                dirfile.seek(self.HEADER_SIZE + i * self.DIR_SIZE)
+                dirfile.seek(header_offset + i * self.DIR_SIZE)
                 dirfile.write(struct.pack(self.DIR_FORMAT, sibling_pos))
+                self.performance.track_write()
+
+        if sibling_pos != empty_bucket.bucket_pos:
+            bucketfile.seek(sibling_pos)
+            ld, num_slots, num_records, next_overflow = struct.unpack(
+                Bucket.HEADER_FORMAT,
+                bucketfile.read(Bucket.HEADER_SIZE)
+            )
+            self.performance.track_read()
+
+            if ld == empty_bucket.local_depth:
+                new_local_depth = ld - 1
+                bucketfile.seek(sibling_pos)
+                bucketfile.write(struct.pack(
+                    Bucket.HEADER_FORMAT,
+                    new_local_depth,
+                    num_slots,
+                    num_records,
+                    next_overflow
+                ))
                 self.performance.track_write()
 
     def free_bucket(self, bucket_pos, bucketfile):
