@@ -238,7 +238,7 @@ class DatabaseManager:
 
             return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
 
-    def range_search(self, table_name: str, start_key, end_key, field_name: str = None):
+    def range_search(self, table_name: str, start_key, end_key, field_name: str = None, spatial_type: str = None):
         if table_name not in self.tables:
             raise ValueError(f"Table {table_name} does not exist")
 
@@ -256,8 +256,14 @@ class DatabaseManager:
 
             if secondary_type == "HASH":
                 raise NotImplementedError(f"Range search is not supported for HASH indexes (secondary index on '{field_name}'). Hash indexes are optimized for exact key lookups only.")
-
-            secondary_result = secondary_index.range_search(start_key, end_key)
+            
+            if secondary_type == "RTREE":
+                if spatial_type is None:
+                    raise ValueError("spatial_type is required for R-Tree searches. Use 'radius' or 'knn'")
+                secondary_result = secondary_index.range_search(start_key, end_key, spatial_type)
+            else:
+                secondary_result = secondary_index.range_search(start_key, end_key)
+                
             if not secondary_result.data:
                 breakdown = {
                     "primary_metrics": {"reads": 0, "writes": 0, "time_ms": 0},
