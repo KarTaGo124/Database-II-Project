@@ -46,8 +46,9 @@ class Executor:
             return (name, "CHAR", ln)
         if kind == "DATE":
             return (name, "CHAR", 10)  # YYYY-MM-DD
-        if kind == "ARRAY_FLOAT":
-            return None  # no soportado por record.py
+        if kind == "ARRAY":
+            dimensions = c.type.length or 2
+            return (name, "ARRAY", dimensions)
         return None
 
     def _pick_primary(self, columns: List[ColumnDef]) -> Tuple[str, str]:
@@ -133,6 +134,8 @@ class Executor:
             return ""
         if ftype == "BOOL":
             return False
+        if ftype == "ARRAY":
+            return (0.0, 0.0) 
         return None
 
     def _cast_value(self, raw: str, ftype: str):
@@ -225,28 +228,54 @@ class Executor:
                           if name not in ['active']]
 
             for row_values in reader:
-                if len(row_values) != len(user_fields):
-                    cast_err += 1
-                    continue
-
                 rec = Record(phys_fields, key_field)
                 ok_row = True
 
-                # Llenar campos del usuario desde CSV
-                for idx, (field_name, field_type, _) in enumerate(user_fields):
+                for field_name, field_type, field_size in user_fields:
                     try:
-                        raw = row_values[idx] if idx < len(row_values) else None
+                        if field_type == "ARRAY" and plan.column_mappings and field_name in plan.column_mappings:
+                            csv_column_names = plan.column_mappings[field_name]
+                            array_values = []
+                            
+                            for csv_col in csv_column_names:
+                                try:
+                                    csv_idx = header.index(csv_col)
+                                    if csv_idx < len(row_values):
+                                        val = self._cast_value(row_values[csv_idx], "FLOAT")
+                                        array_values.append(val)
+                                    else:
+                                        array_values.append(0.0)
+                                except (ValueError, IndexError):
+                                    array_values.append(0.0)
+                            
+                            while len(array_values) < field_size:
+                                array_values.append(0.0)
+                            array_values = array_values[:field_size]
+                            
+                            rec.set_field_value(field_name, tuple(array_values))
+                            
+                        elif field_type != "ARRAY":
+                            try:
+                                csv_idx = header.index(field_name)
+                                if csv_idx < len(row_values):
+                                    raw = row_values[csv_idx]
+                                else:
+                                    raw = None
+                            except ValueError:
+                                raw = None
 
-                        if field_type == "CHAR" and field_name == "fecha":
-                            raw = self._cast_date_ddmmyyyy_to_iso(str(raw) if raw is not None else "")
+                            if field_type == "CHAR" and field_name == "fecha":
+                                raw = self._cast_date_ddmmyyyy_to_iso(str(raw) if raw is not None else "")
 
-                        val = self._cast_value(raw, field_type)
-                        rec.set_field_value(field_name, val)
+                            val = self._cast_value(raw, field_type)
+                            rec.set_field_value(field_name, val)
+                        else:
+                            rec.set_field_value(field_name, tuple([0.0] * field_size))
+                            
                     except Exception as e:
                         ok_row = False
                         break
 
-                # Setear campos internos con defaults
                 if 'active' in [name for (name, _, _) in phys_fields]:
                     rec.set_field_value('active', True)
 
@@ -322,7 +351,17 @@ class Executor:
             return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
         if isinstance(where, (PredicateInPointRadius, PredicateKNN)):
-            raise NotImplementedError("Predicados espaciales no soportados")
+            col = where.column
+            
+            if isinstance(where, PredicateInPointRadius):
+                # point, radius
+                res = self.db.range_search(plan.table, list(where.point), where.radius, field_name=col, spatial_type="radius")
+            else:  # PredicateKNN
+                # point, k
+                res = self.db.range_search(plan.table, list(where.point), where.k, field_name=col, spatial_type="knn")
+                
+            projected_data = self._project_records(res.data, plan.columns)
+            return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 
         raise NotImplementedError("Predicado WHERE no soportado")
 
@@ -357,6 +396,9 @@ class Executor:
                     v = int(v)
                 elif ftype == "FLOAT" and v is not None:
                     v = float(v)
+                elif ftype == "ARRAY" and v is not None:
+                    if isinstance(v, (list, tuple)):
+                        v = tuple(float(x) for x in v)
                 rec.set_field_value(name, v)
         else:
             for (name, ftype, _) in phys_fields:
@@ -371,6 +413,9 @@ class Executor:
                     vv = int(vv)
                 elif ftype == "FLOAT" and vv is not None:
                     vv = float(vv)
+                elif ftype == "ARRAY" and vv is not None:
+                    if isinstance(vv, (list, tuple)):
+                        vv = tuple(float(x) for x in vv)
                 rec.set_field_value(c, vv)
 
         res = self.db.insert(plan.table, rec)
