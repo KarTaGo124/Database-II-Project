@@ -37,7 +37,8 @@ class _T(Transformer):
     def t_float(self, _):    return ColumnType("FLOAT")
     def t_date(self, _):     return ColumnType("DATE")
     def t_varchar(self, it): return ColumnType("VARCHAR", int(_tok2str(it[0])))
-    def t_array(self, _):    return ColumnType("ARRAY_FLOAT")
+    def t_array_2d(self, _): return ColumnType("ARRAY", 2)
+    def t_array_nd(self, it): return ColumnType("ARRAY", int(_tok2str(it[0])))
 
     # ==== LITERALES / BÁSICOS ====
     def int_lit(self, items):
@@ -64,6 +65,12 @@ class _T(Transformer):
         return items[0]
 
     def null(self, _): return None
+    
+    def spatial_point(self, items):
+        return tuple(items)
+    
+    def array_lit(self, items):
+        return items[0]
 
     def ident_or_string(self, items):
         x = items[0]
@@ -107,7 +114,19 @@ class _T(Transformer):
     def load_data(self, items):
         filepath = self.ident_or_string([items[0]])
         table = _tok2str(items[1])
-        return LoadDataPlan(table=table, filepath=filepath)
+        mappings = None
+        if len(items) > 2:
+            mappings = {}
+            for mapping in items[2:]:
+                array_field = mapping[0]
+                csv_columns = mapping[1]
+                mappings[array_field] = csv_columns
+        return LoadDataPlan(table=table, filepath=filepath, column_mappings=mappings)
+    
+    def column_mapping(self, items):
+        array_field = _tok2str(items[0])
+        csv_columns = [_tok2str(item) for item in items[1:]]
+        return (array_field, csv_columns)
 
     # ==== SELECT ====
     def select_all(self, _): return None
@@ -117,10 +136,9 @@ class _T(Transformer):
 
     # punto (x,y)
     def point(self, items):
-        x = float(items[0])
-        y = float(items[1])
-        return (x, y)
-
+        coords = [float(item) for item in items]
+        return 
+    
     def pred_eq(self, items):
         return PredicateEq(column=str(items[0]), value=items[1])
 
