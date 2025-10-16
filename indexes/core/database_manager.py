@@ -97,10 +97,8 @@ class DatabaseManager:
                     for record in existing_records:
                         # Handle B+ Tree unclustered differently
                         if hasattr(secondary_index, 'insert') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
-                            from ..bplus_tree.bplus_tree_unclustered import RecordPointer
-                            # Create a record pointer for the record
-                            record_pointer = RecordPointer(0, hash(record.get_key()) % 1000)
-                            secondary_index.insert(record, record_pointer)
+                            # El nuevo método insert solo necesita el record, no un RecordPointer
+                            secondary_index.insert(record)
                         else:
                             secondary_index.insert(record)
                 except Exception as e:
@@ -138,17 +136,14 @@ class DatabaseManager:
         for field_name, index_info in table_info["secondary_indexes"].items():
             secondary_index = index_info["index"]
             
-            # For unclustered B+ Tree, we need to create a RecordPointer
+            # For unclustered B+ Tree, insert directly (stores primary key internally)
             if hasattr(secondary_index, 'insert') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
-                from ..bplus_tree.bplus_tree_unclustered import RecordPointer
-                
                 # Start performance tracking
                 if hasattr(secondary_index, 'performance'):
                     secondary_index.performance.start_operation()
                 
-                # Use record's key as pointer (simplified)
-                record_pointer = RecordPointer(0, hash(record.get_key()) % 1000)
-                success_secondary = secondary_index.insert(record, record_pointer)
+                # El nuevo método insert solo necesita el record
+                success_secondary = secondary_index.insert(record)
                 
                 # Get performance metrics
                 if hasattr(secondary_index, 'performance'):
@@ -204,13 +199,13 @@ class DatabaseManager:
             if hasattr(secondary_index, 'performance'):
                 secondary_index.performance.start_operation()
 
-            # For B+ Tree unclustered, search returns RecordPointer directly  
+            # For B+ Tree unclustered, search returns list of PrimaryKeyPointers
             if hasattr(secondary_index, 'search') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
-                record_pointer = secondary_index.search(value)
+                primary_key_pointers = secondary_index.search(value)
                 
                 # Get performance metrics from secondary index
                 if hasattr(secondary_index, 'performance'):
-                    secondary_result = secondary_index.performance.end_operation(record_pointer)
+                    secondary_result = secondary_index.performance.end_operation(primary_key_pointers)
                     secondary_time = secondary_result.execution_time_ms
                     secondary_reads = secondary_result.disk_reads
                     secondary_writes = secondary_result.disk_writes
@@ -219,22 +214,48 @@ class DatabaseManager:
                     secondary_reads = 0
                     secondary_writes = 0
 
-                if not record_pointer:
+                if not primary_key_pointers:
                     return OperationResult([], secondary_time, secondary_reads, secondary_writes)
 
-                # For simplified implementation, do a full scan and filter by the indexed field value
-                if hasattr(primary_index, 'scanAll'):
-                    all_records = primary_index.scanAll()
-                    matching_records = []
-                    for rec in all_records:
-                        if rec.get_field_value(field_name) == value:
-                            matching_records.append(rec)
-                else:
-                    matching_records = []
+                # Usar las claves primarias para buscar en el índice primario
+                matching_records = []
+                total_primary_reads = 0
+                total_primary_writes = 0
+                total_primary_time = 0
                 
-                total_time = secondary_time
-                total_reads = secondary_reads
-                total_writes = secondary_writes
+                for pk_pointer in primary_key_pointers:
+                    primary_key = pk_pointer.primary_key
+                    
+                    # Buscar en el índice primario usando la clave primaria
+                    if hasattr(primary_index, 'search'):
+                        # Para B+ Tree clustered que retorna Record directamente
+                        if 'BPlusTreeClusteredIndex' in str(type(primary_index)):
+                            if hasattr(primary_index, 'performance'):
+                                primary_index.performance.start_operation()
+                                
+                            record = primary_index.search(primary_key)
+                            
+                            if hasattr(primary_index, 'performance'):
+                                primary_result = primary_index.performance.end_operation([record] if record else [])
+                                total_primary_reads += primary_result.disk_reads
+                                total_primary_writes += primary_result.disk_writes
+                                total_primary_time += primary_result.execution_time_ms
+                                
+                            if record:
+                                matching_records.append(record)
+                        else:
+                            # Para otros tipos de índices que retornan OperationResult
+                            primary_result = primary_index.search(primary_key)
+                            total_primary_reads += primary_result.disk_reads
+                            total_primary_writes += primary_result.disk_writes
+                            total_primary_time += primary_result.execution_time_ms
+                            
+                            if primary_result.data:
+                                matching_records.extend(primary_result.data)
+                
+                total_time = secondary_time + total_primary_time
+                total_reads = secondary_reads + total_primary_reads
+                total_writes = secondary_writes + total_primary_writes
                 
                 return OperationResult(matching_records, total_time, total_reads, total_writes)
             else:
@@ -334,13 +355,13 @@ class DatabaseManager:
             if hasattr(secondary_index, 'performance'):
                 secondary_index.performance.start_operation()
 
-            # For B+ Tree unclustered, range_search returns List[RecordPointer] directly
+            # For B+ Tree unclustered, range_search returns List[PrimaryKeyPointer] directly
             if hasattr(secondary_index, 'range_search') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
-                record_pointers = secondary_index.range_search(start_key, end_key)
+                primary_key_pointers = secondary_index.range_search(start_key, end_key)
                 
                 # Get performance metrics from secondary index
                 if hasattr(secondary_index, 'performance'):
-                    secondary_result = secondary_index.performance.end_operation(record_pointers)
+                    secondary_result = secondary_index.performance.end_operation(primary_key_pointers)
                     secondary_time = secondary_result.execution_time_ms
                     secondary_reads = secondary_result.disk_reads
                     secondary_writes = secondary_result.disk_writes
@@ -349,21 +370,48 @@ class DatabaseManager:
                     secondary_reads = 0
                     secondary_writes = 0
 
-                if not record_pointers:
+                if not primary_key_pointers:
                     return OperationResult([], secondary_time, secondary_reads, secondary_writes)
 
-                # For simplified implementation, do a full scan and filter by range
+                # Usar las claves primarias para buscar en el índice primario
                 matching_records = []
-                if hasattr(primary_index, 'scanAll'):
-                    all_records = primary_index.scanAll()
-                    for rec in all_records:
-                        field_value = rec.get_field_value(field_name)
-                        if start_key <= field_value <= end_key:
-                            matching_records.append(rec)
+                total_primary_reads = 0
+                total_primary_writes = 0
+                total_primary_time = 0
                 
-                total_time = secondary_time
-                total_reads = secondary_reads
-                total_writes = secondary_writes
+                for pk_pointer in primary_key_pointers:
+                    primary_key = pk_pointer.primary_key
+                    
+                    # Buscar en el índice primario usando la clave primaria
+                    if hasattr(primary_index, 'search'):
+                        # Para B+ Tree clustered que retorna Record directamente
+                        if 'BPlusTreeClusteredIndex' in str(type(primary_index)):
+                            if hasattr(primary_index, 'performance'):
+                                primary_index.performance.start_operation()
+                                
+                            record = primary_index.search(primary_key)
+                            
+                            if hasattr(primary_index, 'performance'):
+                                primary_result = primary_index.performance.end_operation([record] if record else [])
+                                total_primary_reads += primary_result.disk_reads
+                                total_primary_writes += primary_result.disk_writes
+                                total_primary_time += primary_result.execution_time_ms
+                                
+                            if record:
+                                matching_records.append(record)
+                        else:
+                            # Para otros tipos de índices que retornan OperationResult
+                            primary_result = primary_index.search(primary_key)
+                            total_primary_reads += primary_result.disk_reads
+                            total_primary_writes += primary_result.disk_writes
+                            total_primary_time += primary_result.execution_time_ms
+                            
+                            if primary_result.data:
+                                matching_records.extend(primary_result.data)
+                
+                total_time = secondary_time + total_primary_time
+                total_reads = secondary_reads + total_primary_reads
+                total_writes = secondary_writes + total_primary_writes
 
                 return OperationResult(matching_records, total_time, total_reads, total_writes)
             else:
@@ -483,11 +531,12 @@ class DatabaseManager:
                 if hasattr(secondary_index, 'performance'):
                     secondary_index.performance.start_operation()
                 
-                # For B+ Tree unclustered, delete returns bool directly
-                if hasattr(secondary_index, 'delete') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
-                    # For unclustered B+ Tree, we need to extract the key from the record for the indexed field
+                # For B+ Tree unclustered, we need both secondary and primary keys
+                if hasattr(secondary_index, 'delete_by_primary_key') and 'BPlusTreeUnclusteredIndex' in str(type(secondary_index)):
+                    # For unclustered B+ Tree, we need to delete by both secondary key and primary key
                     field_value = record.get_field_value(fname)
-                    success = secondary_index.delete(field_value)
+                    primary_key = record.get_key()
+                    success = secondary_index.delete_by_primary_key(field_value, primary_key)
                     
                     # Get performance metrics
                     if hasattr(secondary_index, 'performance'):
@@ -732,10 +781,10 @@ class DatabaseManager:
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
             
-            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_btree.pkl")
+            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_btree.dat")
             
             return BPlusTreeUnclusteredIndex(
-                order=4,
+                order=3,  # Smaller order to fit in 4KB pages
                 index_column=field_name,
                 file_path=filename
             )
