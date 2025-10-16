@@ -11,12 +11,13 @@ MAX_OVERFLOW = 2
 class Bucket:
     HEADER_FORMAT = "iiii" # local_depth, allocated_slots, actual_size, next_bucket
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-    def __init__(self, bucket_pos, index_record_size, local_depth=1, num_slots=0, num_records=0, next_overflow_bucket=-1, bucketfile=None, performance=None):
+    def __init__(self, bucket_pos, index_record_size, local_depth=1, num_slots=0, num_records=0, next_overflow_bucket=-1,  performance=None, bucketfile=None, index_record_template=None):
         self.bucket_pos = bucket_pos
         self.local_depth = local_depth
         self.num_slots = num_slots
         self.num_records = num_records
         self.next_overflow_bucket = next_overflow_bucket
+        self.index_record_template = index_record_template
         self.index_record_size = index_record_size
         self.elements = [] #memory loaded elements
         self.elements_pos = [] #pos of elements in bucket
@@ -29,7 +30,7 @@ class Bucket:
             for i in range(current_bucket.num_slots):
                 packed_record = bucketfile.read(self.index_record_size)
                 if packed_record != tombstone:
-                    self.elements.append(IndexRecord.unpack(packed_record,self.index_record_size, "index_value"))
+                    self.elements.append(IndexRecord.unpack(packed_record,self.index_record_template.value_type_size, "index_value"))
                     self.elements_pos.append(current_bucket.bucket_pos + Bucket.HEADER_SIZE + (i * self.index_record_size))
             self.performance.track_read()
 
@@ -45,7 +46,7 @@ class Bucket:
             ld, num_slots, num_records, next_overflow = struct.unpack(Bucket.HEADER_FORMAT,bucketfile.read(Bucket.HEADER_SIZE))
             self.performance.track_read()
             return Bucket(self.next_overflow_bucket, self.index_record_size, ld, num_slots,
-                                    num_records, next_overflow)
+                                    num_records, next_overflow,self.performance,bucketfile,self.index_record_template)
         return None
 
     def add_overflow(self, overflow_bucket_pos, bucketfile):
@@ -59,14 +60,13 @@ class Bucket:
         self.performance.start_operation()
         matching_pks = []
         for e in self.elements:
-            try:
-                value = e.index_value
-                print(value)
+            value = e.index_value
+            if isinstance(value, bytes):
+                value = value.decode('utf-8').strip('\x00').strip()
+            else:
                 value = str(value).strip()
-                if value == secondary_value:
-                    matching_pks.append(e.primary_key)
-            except struct.error:
-                continue
+            if value == secondary_value:
+                matching_pks.append(e.primary_key)
         return matching_pks
 
     def insert(self, index_record: IndexRecord,bucketfile):
@@ -89,10 +89,9 @@ class Bucket:
             #aniadir al siguiente slot del ultimo si no hay disponible antes,
             #si hay espacio todaviaa
             if insert_position is None:
-                if self.num_slots < BLOCK_FACTOR:
+                if self.num_records < BLOCK_FACTOR:
+                    insert_position = self.bucket_pos + Bucket.HEADER_SIZE + (self.num_records * self.index_record_size)
                     self.num_slots += 1
-                    insert_position = self.bucket_pos + Bucket.HEADER_SIZE + (
-                                self.num_slots * self.index_record_size)
                 else:
                     return False
 
@@ -115,8 +114,7 @@ class Bucket:
         current_bucket = self
         i = 0
         while current_bucket is not None:
-            for packed_record in current_bucket.elements:
-                unpacked = IndexRecord.unpack(packed_record, self.index_record_size,"index_value")
+            for unpacked in current_bucket.elements:
                 stored_key = unpacked.index_value
                 should_delete = False
                 if stored_key == key:
@@ -242,10 +240,15 @@ class ExtendibleHashing:
         local_depth, num_slots, num_records, next_overflow = struct.unpack(Bucket.HEADER_FORMAT, bucketfile.read(Bucket.HEADER_SIZE))
         self.performance.track_read()
 
-        return Bucket(bucket_pos, self.index_record_size, local_depth, num_slots, num_records, next_overflow)
+        return Bucket(bucket_pos, self.index_record_size, local_depth, num_slots, num_records, next_overflow,self.performance,bucketfile,self.index_record_template)
 
     def _insert_index_record(self, index_record, dirfile, bucketfile):
-        head_bucket = self._get_bucket_from_key(index_record.index_value, dirfile, bucketfile)
+        value = index_record.index_value
+        if isinstance(value, bytes):
+            value = value.decode('utf-8').strip('\x00').strip()
+        else:
+            value = str(value).strip()
+        head_bucket = self._get_bucket_from_key(value, dirfile, bucketfile)
         current_bucket = head_bucket
         overflow_count = 0
 
