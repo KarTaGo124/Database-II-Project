@@ -3,9 +3,7 @@ import bisect
 import pickle
 import os
 from ..core.performance_tracker import PerformanceTracker, OperationResult
-from ..core.record import Record
-
-PAGE_SIZE = 4096 
+from ..core.record import Record 
 
 
 class Node:
@@ -63,13 +61,14 @@ class BPlusTreeUnclusteredIndex:
         self.max_keys = order - 1
         self.min_keys = (order + 1) // 2 - 1
         self.key_field = index_column
-        self.file_path = file_path
-        
+        self.file_path = file_path + ".dat"
+        self.page_size = 4096
+
         self.performance = PerformanceTracker()
-        
+
         self.next_page_id = 1
         self.root_page_id = 0
-        
+
         self._initialize_file()
         
     def _initialize_file(self):
@@ -96,7 +95,7 @@ class BPlusTreeUnclusteredIndex:
                     self.next_page_id = int.from_bytes(next_bytes, 'little')
     
     def _get_page_offset(self, page_id: int) -> int:
-        return 16 + (page_id * PAGE_SIZE) 
+        return 16 + (page_id * self.page_size) 
     
     def _read_page(self, page_id: int) -> Optional[Node]:
         self.performance.track_read()
@@ -108,11 +107,11 @@ class BPlusTreeUnclusteredIndex:
             with open(self.file_path, 'rb') as f:
                 offset = self._get_page_offset(page_id)
                 f.seek(offset)
-                page_data = f.read(PAGE_SIZE)
-                
-                if len(page_data) < PAGE_SIZE:
+                page_data = f.read(self.page_size)
+
+                if len(page_data) < self.page_size:
                     return None
-                
+
                 node = pickle.loads(page_data.rstrip(b'\x00'))
                 node.page_id = page_id
                 return node
@@ -126,11 +125,11 @@ class BPlusTreeUnclusteredIndex:
         
         node.page_id = page_id
         serialized = pickle.dumps(node)
-        
-        if len(serialized) > PAGE_SIZE:
-            raise Exception(f"Page {page_id} too large: {len(serialized)} > {PAGE_SIZE}")
-        
-        padded_data = serialized + b'\x00' * (PAGE_SIZE - len(serialized))
+
+        if len(serialized) > self.page_size:
+            raise Exception(f"Page {page_id} too large: {len(serialized)} > {self.page_size}")
+
+        padded_data = serialized + b'\x00' * (self.page_size - len(serialized))
         
         with open(self.file_path, 'r+b' if os.path.exists(self.file_path) else 'w+b') as f:
             offset = self._get_page_offset(page_id)

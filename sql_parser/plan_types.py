@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict
 
 # Tipos/Columnas
 
@@ -23,11 +23,10 @@ class CreateTablePlan:
     columns: List[ColumnDef]
 
 @dataclass
-class LoadFromCSVPlan:
+class LoadDataPlan:
     table: str
     filepath: str
-    index_kind: str           # por ejemplo: "ISAM"
-    index_cols: List[str]     # por ejemplo: ["id"] o ["(id","nombre)"] ya normalizados a ["id","nombre"]
+    column_mappings: Optional[Dict[str, List[str]]] = None
 
 @dataclass
 class PredicateEq:
@@ -43,13 +42,13 @@ class PredicateBetween:
 @dataclass
 class PredicateInPointRadius:
     column: str
-    point: Tuple[float, float]
+    point: Tuple[float, ...]
     radius: float
 
 @dataclass
 class PredicateKNN:
     column: str
-    point: Tuple[float, float]
+    point: Tuple[float, ...]
     k: int
 
 @dataclass

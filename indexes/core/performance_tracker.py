@@ -1,17 +1,19 @@
 import time
 
 class OperationResult:
-    def __init__(self, data, execution_time_ms, disk_reads, disk_writes, rebuild_triggered=False):
+    def __init__(self, data, execution_time_ms, disk_reads, disk_writes, rebuild_triggered=False, operation_breakdown=None):
         self.data = data
         self.execution_time_ms = execution_time_ms
         self.disk_reads = disk_reads
         self.disk_writes = disk_writes
         self.total_disk_accesses = disk_reads + disk_writes
         self.rebuild_triggered = rebuild_triggered
+        self.operation_breakdown = operation_breakdown or {}
 
     def __repr__(self):
         rebuild_info = " [REBUILD]" if self.rebuild_triggered else ""
-        return f"OperationResult(data={self.data}, time={self.execution_time_ms:.2f}ms, accesses={self.total_disk_accesses}{rebuild_info})"
+        breakdown_info = f" breakdown={self.operation_breakdown}" if self.operation_breakdown else ""
+        return f"OperationResult(data={self.data}, time={self.execution_time_ms:.2f}ms, accesses={self.total_disk_accesses}{rebuild_info}{breakdown_info})"
 
 class PerformanceTracker:
     def __init__(self):
@@ -48,7 +50,6 @@ class PerformanceTracker:
     def end_operation(self, result_data, rebuild_triggered=False):
         execution_time = (time.time() - self.start_time) * 1000
 
-        # Track if rebuild occurred in this operation or any nested operation
         if rebuild_triggered:
             self.rebuild_occurred = True
 
@@ -57,7 +58,6 @@ class PerformanceTracker:
             total_reads = previous_state['reads'] + self.reads
             total_writes = previous_state['writes'] + self.writes
 
-            # Combine rebuild flags from current and previous operations
             combined_rebuild = self.rebuild_occurred or previous_state['rebuild_occurred']
 
             self.reads = total_reads

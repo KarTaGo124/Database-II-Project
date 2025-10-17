@@ -1,7 +1,7 @@
 start: stmt (";" stmt)* ";"?
 
 ?stmt: create_table
-     | create_from_file
+     | load_data
      | create_index
      | drop_table
      | drop_index
@@ -18,15 +18,17 @@ type_spec: "INT"                               -> t_int
          | "FLOAT"                             -> t_float
          | "DATE"                              -> t_date
          | "VARCHAR" "[" SIGNED_INT "]"        -> t_varchar
-         | "ARRAY" "[" "FLOAT" "]"             -> t_array
+         | "ARRAY" "[" "FLOAT" "]"             -> t_array_2d
+         | "ARRAY" "[" "FLOAT" "," SIGNED_INT "]" -> t_array_nd
 
 INDEX_KIND: "SEQUENTIAL" | "ISAM" | "BTREE" | "RTREE" | "HASH"
 index_kind: INDEX_KIND
 ident_or_string: IDENT | STRING
 
-# ===== CREATE FROM FILE =====
-# Usamos STRING (ESCAPED_STRING) en una sola línea para evitar ambigüedades
-create_from_file: "CREATE" "TABLE" IDENT "FROM" "FILE" STRING "USING" "INDEX" index_kind "(" (ident_or_string | "(" ident_or_string "," ident_or_string ")") ")"
+# ===== LOAD DATA FROM FILE =====
+load_data: "LOAD" "DATA" "FROM" "FILE" STRING "INTO" IDENT ["WITH" "MAPPING" "(" column_mapping ("," column_mapping)* ")"]
+
+column_mapping: IDENT "=" "ARRAY" "(" IDENT ("," IDENT)* ")"
 
 # ===== CREATE INDEX =====
 create_index: "CREATE" "INDEX" "ON" IDENT "(" IDENT ")" "USING" index_kind
@@ -42,10 +44,10 @@ select_all: "*"
 select_cols: col_list
 select_stmt: "SELECT" (select_all | select_cols) "FROM" IDENT ["WHERE" predicate]
 
-?predicate: IDENT "=" literal                           -> pred_eq
-          | IDENT "BETWEEN" literal "AND" literal       -> pred_between
-          | IDENT "IN" "(" point "," number ")"         -> pred_in
-          | IDENT "NEAREST" "(" point "," SIGNED_INT ")"-> pred_nearest
+?predicate: IDENT "=" literal                                    -> pred_eq
+          | IDENT "BETWEEN" literal "AND" literal            -> pred_between
+          | IDENT "IN" "(" spatial_point "," number ")"      -> pred_in
+          | IDENT "NEAREST" "(" spatial_point "," SIGNED_INT ")" -> pred_nearest
 
 # ===== INSERT =====
 insert_stmt: "INSERT" "INTO" IDENT ["(" col_list ")"] "VALUES" "(" literal ("," literal)* ")"
@@ -55,13 +57,14 @@ col_list: IDENT ("," IDENT)*
 delete_stmt: "DELETE" "FROM" IDENT "WHERE" predicate
 
 # ===== Básicos =====
-point: "(" number "," number ")"
+spatial_point: "(" number ("," number)* ")"
 number: SIGNED_INT   -> int_lit
       | SIGNED_FLOAT -> float_lit
 
 literal: number
-       | STRING      -> string
-       | "NULL"      -> null
+       | STRING         -> string
+       | "NULL"         -> null
+       | spatial_point  -> array_lit
 
 %import common.SIGNED_INT
 %import common.SIGNED_FLOAT
