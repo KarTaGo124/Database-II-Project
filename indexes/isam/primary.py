@@ -780,7 +780,7 @@ class ISAMPrimaryIndex:
 
             free_ratio = free_count / total_pages
 
-            if free_ratio > 0.25:
+            if free_ratio > 0.40:
                 return True
 
             chain_count = 0
@@ -795,7 +795,7 @@ class ISAMPrimaryIndex:
 
             if chain_count > 0:
                 avg_chain = chain_total / chain_count
-                return avg_chain > 2.5
+                return avg_chain > 4.0
 
         return False
 
@@ -824,7 +824,12 @@ class ISAMPrimaryIndex:
             else:
                 self._handle_page_overflow(file, target_data_page_num, page, record, target_leaf_page_num)
 
-        return self.performance.end_operation(True, False)
+        rebuild_triggered = False
+        if self._should_rebuild():
+            self.rebuild()
+            rebuild_triggered = True
+
+        return self.performance.end_operation(True, rebuild_triggered)
 
     def search(self, key_value):
         self.performance.start_operation()
