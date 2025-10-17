@@ -1,12 +1,7 @@
-"""
-Test B+ Tree Unclustered Index using DatabaseManager
-Disk-only operations with sales CSV
-Demonstrates two-step lookup: secondary → primary
-"""
+
 import sys
 import os
-
-# Add project root to path
+import csv
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
@@ -14,7 +9,6 @@ from indexes.core.database_manager import DatabaseManager
 from indexes.core.record import Table, Record
 
 def create_sales_table():
-    """Define sales table structure"""
     sql_fields = [
         ("sale_id", "INT", 4),
         ("product_name", "CHAR", 50),
@@ -30,8 +24,6 @@ def create_sales_table():
     )
 
 def load_sales_from_csv(db_manager, table_name, csv_path, max_records=100):
-    """Load sales from CSV"""
-    import csv
     
     print(f"\n{'='*60}")
     print(f"LOADING DATA FROM CSV: {csv_path}")
@@ -52,7 +44,6 @@ def load_sales_from_csv(db_manager, table_name, csv_path, max_records=100):
                 unit_price = float(row['Precio unitario'].replace(',', '.'))
                 sale_date = row['Fecha de venta'].strip().encode('utf-8')
                 
-                # Get table definition
                 table_info = db_manager.tables[table_name]
                 table_def = table_info["table"]
                 
@@ -75,11 +66,10 @@ def load_sales_from_csv(db_manager, table_name, csv_path, max_records=100):
                 print(f"  Error loading row: {e}")
                 continue
     
-    print(f"\n✓ Total records loaded: {count}")
+    print(f"\nTotal records loaded: {count}")
     return count
 
 def test_secondary_index_search(db_manager, table_name):
-    """Test searches using secondary (unclustered) index"""
     print(f"\n{'='*60}")
     print("SECONDARY INDEX SEARCH TEST (Two-Step Lookup)")
     print(f"{'='*60}")
@@ -97,13 +87,11 @@ def test_secondary_index_search(db_manager, table_name):
         print("   No records found")
     print(f"   Total Performance: {result.execution_time_ms:.2f}ms | Disk R/W: {result.disk_reads}/{result.disk_writes}")
     
-    # Test 2: Non-existent product
     print("\n2. Search by product_name='NonExistent':")
     result = db_manager.search(table_name, b"NonExistent", field_name="product_name")
     print(f"   Found: {len(result.data)} records")
     print(f"   Performance: {result.execution_time_ms:.2f}ms | Disk R/W: {result.disk_reads}/{result.disk_writes}")
     
-    # Test 3: Range search on secondary index
     print("\n3. Range search by product_name ('A' to 'C'):")
     result = db_manager.range_search(table_name, b"A", b"C", field_name="product_name")
     print(f"   Found: {len(result.data)} records")
@@ -115,41 +103,34 @@ def test_secondary_index_search(db_manager, table_name):
     print(f"   Performance: {result.execution_time_ms:.2f}ms | Disk R/W: {result.disk_reads}/{result.disk_writes}")
 
 def test_secondary_index_delete(db_manager, table_name):
-    """Test deletions using secondary index"""
     print(f"\n{'='*60}")
     print("SECONDARY INDEX DELETE TEST")
     print(f"{'='*60}")
     
-    # Test 1: Delete by secondary key
     print("\n1. Delete all records with product_name='Drone':")
     result = db_manager.delete(table_name, b"Drone", field_name="product_name")
     print(f"   Deleted: {result.data} record(s)")
     print(f"   Performance: {result.execution_time_ms:.2f}ms | Disk R/W: {result.disk_reads}/{result.disk_writes}")
     
-    # Verify deletion
     search_result = db_manager.search(table_name, b"Drone", field_name="product_name")
     print(f"   Verification: Found {len(search_result.data)} records (should be 0)")
 
 def test_direct_vs_secondary_search(db_manager, table_name):
-    """Compare direct (primary) vs secondary index search"""
     print(f"\n{'='*60}")
     print("COMPARISON: Direct vs Secondary Index Search")
     print(f"{'='*60}")
     
-    # First find a product to get its ID
     result = db_manager.search(table_name, b"Telescopio Digital", field_name="product_name")
     if result.data:
         sale_id = result.data[0].sale_id
         
         print(f"\nSearching for sale_id={sale_id} (Telescopio Digital)")
         
-        # A) Direct search using primary index
         print("\n  A) Direct search by sale_id (Primary/Clustered Index):")
         direct_result = db_manager.search(table_name, sale_id)
         print(f"     Single-step lookup")
         print(f"     Performance: {direct_result.execution_time_ms:.2f}ms | Disk R/W: {direct_result.disk_reads}/{direct_result.disk_writes}")
         
-        # B) Search using secondary index
         print("\n  B) Search by product_name (Secondary → Primary):")
         secondary_result = db_manager.search(table_name, b"Telescopio Digital", field_name="product_name")
         print(f"     Two-step lookup (unclustered → clustered)")
@@ -169,20 +150,16 @@ def main():
     print("B+ TREE UNCLUSTERED INDEX TEST - DISK-BASED")
     print("="*60)
     
-    # Setup
     db_manager = DatabaseManager("btree_unclustered_test_db")
     table = create_sales_table()
     csv_path = "data/datasets/sales_dataset_unsorted.csv"
     
-    # Create table with B+ Tree clustered index (primary)
     print("\nCreating table 'sales' with B+ Tree Clustered Index (Primary)...")
     db_manager.create_table(table, primary_index_type="BTREE")
     print("✓ Table created with B+ Tree (Clustered)")
     
-    # Load data
     load_sales_from_csv(db_manager, "sales", csv_path, max_records=100)
     
-    # Create secondary index on product_name (unclustered)
     print(f"\n{'='*60}")
     print("Creating Secondary B+ Tree Index on 'product_name'...")
     print(f"{'='*60}")
@@ -190,26 +167,10 @@ def main():
     print("✓ Secondary index created and populated")
     print("  Index type: B+ Tree Unclustered (stores product_name → sale_id)")
     
-    # Run tests
     test_secondary_index_search(db_manager, "sales")
     test_direct_vs_secondary_search(db_manager, "sales")
     test_secondary_index_delete(db_manager, "sales")
     
-    # Final stats
-    print(f"\n{'='*60}")
-    print("TEST SUMMARY")
-    print(f"{'='*60}")
-    print("✓ All operations completed successfully")
-    print("✓ All data stored on disk (no RAM caching)")
-    print("✓ Disk reads/writes tracked for both indexes")
-    
-    print(f"\nKey Takeaways:")
-    print("  1. Unclustered index stores: secondary_key → primary_key")
-    print("  2. All searches use two-step lookup: secondary → primary")
-    print("  3. Primary index is clustered (stores actual records)")
-    print("  4. Secondary index is unclustered (stores pointers)")
-    print("  5. All operations are disk-based (4KB pages)")
-    print("  6. Performance metrics track both index accesses")
 
 if __name__ == "__main__":
     main()
