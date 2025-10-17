@@ -93,15 +93,10 @@ class DatabaseManager:
                     scan_result = primary_index.scan_all()
                     existing_records = scan_result.data
 
-                    field_type, field_size = field_info
+                    # Para B+ Tree unclustered, pasamos el Record completo
+                    # El índice extraerá el campo secundario internamente
                     for record in existing_records:
-                        secondary_value = getattr(record, field_name)
-                        primary_key = record.get_key()
-
-                        index_record = IndexRecord(field_type, field_size)
-                        index_record.set_index_data(secondary_value, primary_key)
-
-                        secondary_index.insert(index_record)
+                        secondary_index.insert(record)
                 except Exception as e:
                     del table_info["secondary_indexes"][field_name]
                     if hasattr(secondary_index, 'drop_index'):
@@ -159,10 +154,8 @@ class DatabaseManager:
         if field_name is None:
             primary_index = table_info["primary_index"]
             result = primary_index.search(value)
-            if result.data:
-                return OperationResult([result.data], result.execution_time_ms, result.disk_reads, result.disk_writes)
-            else:
-                return OperationResult([], result.execution_time_ms, result.disk_reads, result.disk_writes)
+            # No envolver result.data en otra lista - ya viene como lista
+            return OperationResult(result.data, result.execution_time_ms, result.disk_reads, result.disk_writes)
 
         elif field_name in table_info["secondary_indexes"]:
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
@@ -186,14 +179,17 @@ class DatabaseManager:
 
             if secondary_result.data:
                 matching_records = []
-                for primary_key in secondary_result.data:
+                for pk_pointer in secondary_result.data:
+                    # Extraer el primary_key del PrimaryKeyPointer
+                    primary_key = pk_pointer.primary_key if hasattr(pk_pointer, 'primary_key') else pk_pointer
+
                     primary_result = primary_index.search(primary_key)
                     primary_lookup_reads += primary_result.disk_reads
                     primary_lookup_writes += primary_result.disk_writes
                     primary_lookup_time += primary_result.execution_time_ms
 
                     if primary_result.data:
-                        matching_records.append(primary_result.data)
+                        matching_records.extend(primary_result.data)
 
                 total_reads += primary_lookup_reads
                 total_writes += primary_lookup_writes
@@ -281,14 +277,17 @@ class DatabaseManager:
 
             if secondary_result.data:
                 matching_records = []
-                for primary_key in secondary_result.data:
+                for pk_pointer in secondary_result.data:
+                    # Extraer el primary_key del PrimaryKeyPointer
+                    primary_key = pk_pointer.primary_key if hasattr(pk_pointer, 'primary_key') else pk_pointer
+
                     primary_result = primary_index.search(primary_key)
                     primary_lookup_reads += primary_result.disk_reads
                     primary_lookup_writes += primary_result.disk_writes
                     primary_lookup_time += primary_result.execution_time_ms
 
                     if primary_result.data:
-                        matching_records.append(primary_result.data)
+                        matching_records.extend(primary_result.data)
 
                 total_reads += primary_lookup_reads
                 total_writes += primary_lookup_writes
@@ -416,37 +415,42 @@ class DatabaseManager:
             primary_index = table_info["primary_index"]
             secondary_index = table_info["secondary_indexes"][field_name]["index"]
 
-            del_result = secondary_index.delete(value)
-            deleted_pks = del_result.data if isinstance(del_result.data, list) else []
+            # Paso 1: Buscar todos los primary_keys con ese valor secundario
+            search_result = secondary_index.search(value)
+            pk_pointers = search_result.data if search_result.data else []
+
+            # Extraer primary_keys de los PrimaryKeyPointers
+            deleted_pks = [pk.primary_key if hasattr(pk, 'primary_key') else pk for pk in pk_pointers]
 
             breakdown = {}
             for fname in table_info["secondary_indexes"].keys():
                 breakdown[f"secondary_metrics_{fname}"] = {"reads": 0, "writes": 0, "time_ms": 0}
             breakdown["primary_metrics"] = {"reads": 0, "writes": 0, "time_ms": 0}
 
-            breakdown[f"secondary_metrics_{field_name}"]["reads"] = del_result.disk_reads
-            breakdown[f"secondary_metrics_{field_name}"]["writes"] = del_result.disk_writes
-            breakdown[f"secondary_metrics_{field_name}"]["time_ms"] = del_result.execution_time_ms
+            breakdown[f"secondary_metrics_{field_name}"]["reads"] = search_result.disk_reads
+            breakdown[f"secondary_metrics_{field_name}"]["writes"] = search_result.disk_writes
+            breakdown[f"secondary_metrics_{field_name}"]["time_ms"] = search_result.execution_time_ms
 
             if not deleted_pks:
-                return OperationResult(0, del_result.execution_time_ms, del_result.disk_reads, del_result.disk_writes, operation_breakdown=breakdown)
+                return OperationResult(0, search_result.execution_time_ms, search_result.disk_reads, search_result.disk_writes, operation_breakdown=breakdown)
 
             deleted_count = 0
-            total_reads = del_result.disk_reads
-            total_writes = del_result.disk_writes
-            total_time = del_result.execution_time_ms
+            total_reads = search_result.disk_reads
+            total_writes = search_result.disk_writes
+            total_time = search_result.execution_time_ms
 
+            # Paso 2: Para cada primary_key, buscar el record y eliminar
             for pk in deleted_pks:
-                search_result = primary_index.search(pk)
-                breakdown["primary_metrics"]["reads"] += search_result.disk_reads
-                breakdown["primary_metrics"]["writes"] += search_result.disk_writes
-                breakdown["primary_metrics"]["time_ms"] += search_result.execution_time_ms
-                total_reads += search_result.disk_reads
-                total_writes += search_result.disk_writes
-                total_time += search_result.execution_time_ms
+                pk_search_result = primary_index.search(pk)
+                breakdown["primary_metrics"]["reads"] += pk_search_result.disk_reads
+                breakdown["primary_metrics"]["writes"] += pk_search_result.disk_writes
+                breakdown["primary_metrics"]["time_ms"] += pk_search_result.execution_time_ms
+                total_reads += pk_search_result.disk_reads
+                total_writes += pk_search_result.disk_writes
+                total_time += pk_search_result.execution_time_ms
 
-                if search_result.data:
-                    record = search_result.data
+                if pk_search_result.data:
+                    record = pk_search_result.data[0] if isinstance(pk_search_result.data, list) else pk_search_result.data
 
                     for fname, index_info in table_info["secondary_indexes"].items():
                         if fname != field_name:

@@ -135,6 +135,29 @@ class Record:
                 value = value.decode('utf-8').rstrip('\x00')
             print(f"  {field_name} ({field_type}[{field_size}]): {value}")
 
+    def __getstate__(self):
+        """Personaliza la serialización con pickle"""
+        state = {
+            'value_type_size': self.value_type_size,
+            'key_field': self.key_field,
+            'FORMAT': self.FORMAT,
+            'RECORD_SIZE': self.RECORD_SIZE
+        }
+        # Guardar todos los valores de los campos
+        for field_name, _, _ in self.value_type_size:
+            state[field_name] = getattr(self, field_name, None)
+        return state
+
+    def __setstate__(self, state):
+        """Personaliza la deserialización con pickle"""
+        self.value_type_size = state['value_type_size']
+        self.key_field = state['key_field']
+        self.FORMAT = state['FORMAT']
+        self.RECORD_SIZE = state['RECORD_SIZE']
+        # Restaurar todos los campos
+        for field_name, _, _ in self.value_type_size:
+            setattr(self, field_name, state.get(field_name, None))
+
 
 class IndexRecord(Record):
     def __init__(self, index_field_type: str, index_field_size: int):
