@@ -88,7 +88,7 @@ class RTreeSecondaryIndex:
                 raise ValueError("k debe ser mayor que 0")
             
             bbox = tuple(list(coords) + list(coords))
-            nearest_pks = list(self.idx.nearest(bbox, k * 2))
+            nearest_pks = list(self.idx.nearest(bbox, k))
             
             self.performance.track_read()
             return self.performance.end_operation(nearest_pks)
