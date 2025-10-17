@@ -770,8 +770,13 @@ class DatabaseManager:
         elif index_type == "BTREE":
             primary_dir = os.path.join(self.base_dir, table.table_name, f"primary_btree_{table.key_field}")
             os.makedirs(primary_dir, exist_ok=True)
-            primary_filename = os.path.join(primary_dir, "datos.pkl")
-            return BPlusTreeClusteredIndex(table, primary_filename, order=4)
+            primary_filename = os.path.join(primary_dir, "btree_clustered")
+            return BPlusTreeClusteredIndex(
+                order=4,
+                key_column=table.key_field,
+                file_path=primary_filename,
+                record_class=Record
+            )
 
 
         raise NotImplementedError(f"Primary index type {index_type} not implemented yet")
@@ -783,11 +788,13 @@ class DatabaseManager:
             secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_btree_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
 
-            table_info = self.tables[table.table_name]
-            primary_index = table_info["primary_index"]
-            filename = os.path.join(secondary_dir, "datos.pkl")
+            filename = os.path.join(secondary_dir, "btree_unclustered")
 
-            return BPlusTreeUnclusteredIndex(field_name, primary_index, filename, order=4)
+            return BPlusTreeUnclusteredIndex(
+                order=4,
+                index_column=field_name,
+                file_path=filename
+            )
         elif index_type == "HASH":
 
             secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_hash_{field_name}")
@@ -860,4 +867,3 @@ class DatabaseManager:
         primary_index = table_info["primary_index"]
 
         return primary_index.scan_all()
-
