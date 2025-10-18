@@ -441,7 +441,6 @@ class ExtendibleHashing:
         self._update_directory_pointers(head_bucket_pos, new_bucket_pos, new_local_depth, dirfile)
 
         for index_record in all_records_packed:
-            secondary_value = index_record.index_value
             self._insert_index_record(index_record, dirfile, bucketfile)
 
     def _get_all_records_from_bucket(self, bucket, bucket_pos, bucketfile):
@@ -462,27 +461,22 @@ class ExtendibleHashing:
         return all_records
 
     def _double_directory(self, dirfile):
-        # Leer el directorio actual completo
         dir_size = 2 ** self.global_depth
-        dirfile.seek(self.HEADER_SIZE)
+        header = self.HEADER_SIZE
+
+        dirfile.seek(header)
         buf = dirfile.read(dir_size * self.DIR_SIZE)
         self.performance.track_read()
 
-        # Desempaquetar las entradas actuales
         current_dir = [entry[0] for entry in struct.iter_unpack(self.DIR_FORMAT, buf)]
 
-        # Duplicar la profundidad global
-        self.global_depth += 1
-        self._write_header()  # actualiza encabezado con nueva global_depth
-
-        # Crear una nueva lista duplicada 00,01   10 11
-        new_dir = []
-        for entry in current_dir:
-            new_dir.append(entry)
-            new_dir.append(entry)
-
-        dirfile.seek(self.HEADER_SIZE)
+        new_dir = current_dir + current_dir
+        dirfile.seek(header)
         dirfile.write(struct.pack(self.DIR_FORMAT * len(new_dir), *new_dir))
+
+        self.global_depth += 1
+        dirfile.seek(0)
+        dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, self.first_free_bucket_pos))
         self.performance.track_write()
 
     def _update_directory_pointers(self, old_bucket_pos, new_bucket_pos, new_local_depth, dirfile):
