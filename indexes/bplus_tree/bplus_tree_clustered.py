@@ -65,9 +65,11 @@ class BPlusTreeClusteredIndex:
             root.next_id = None
 
             self._write_page(1, root)
+            self._initialized = True
         else:
             # Leer metadata existente
             self._read_metadata()
+            self._initialized = True
 
     def _write_metadata(self):
         """Escribe metadata en la página 0"""
@@ -148,7 +150,7 @@ class BPlusTreeClusteredIndex:
                     return None
                     
                 node_data = pickle.loads(page_data[:actual_end])
-                
+
             if node_data['is_leaf']:
                 node = ClusteredLeafNode()
                 node.keys = node_data['keys']
@@ -160,7 +162,8 @@ class BPlusTreeClusteredIndex:
                 node.keys = node_data['keys']
                 node.children_ids = node_data['children_ids']  
                 
-            node.id = node_data['id']
+            # Support both 'id' and 'node_id' for backward compatibility
+            node.id = node_data.get('id', node_data.get('node_id'))
             node.parent_id = node_data.get('parent_id')
             
             return node
@@ -173,7 +176,9 @@ class BPlusTreeClusteredIndex:
         if page_id == 0:  # No permitir escribir en página de metadata
             raise Exception("Cannot write data to metadata page (page 0)")
 
-        self.performance.track_write()
+        # Only track writes after initialization
+        if hasattr(self, '_initialized') and self._initialized:
+            self.performance.track_write()
 
         try:
             page_data = {
@@ -255,6 +260,8 @@ class BPlusTreeClusteredIndex:
         if page_id == 0:  # No permitir eliminar metadata
             raise Exception("Cannot delete metadata page (page 0)")
 
+        self.performance.track_write()
+
         try:
             offset = self._get_page_offset(page_id)
 
@@ -302,15 +309,15 @@ class BPlusTreeClusteredIndex:
             
     def search(self, key: Any) -> OperationResult:
         self.performance.start_operation()
-        
+
         leaf_node = self._find_leaf_node(key)
         pos = bisect.bisect_left(leaf_node.keys, key)
-        
+
         if pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
             record = leaf_node.records[pos]
-            return self.performance.end_operation([record])
-        
-        return self.performance.end_operation([])
+            return self.performance.end_operation(record)
+
+        return self.performance.end_operation(None)
 
     def insert(self, record: Record) -> OperationResult:
         self.performance.start_operation()

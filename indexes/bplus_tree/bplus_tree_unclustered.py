@@ -3,7 +3,7 @@ import bisect
 import pickle
 import os
 from ..core.performance_tracker import PerformanceTracker, OperationResult
-from ..core.record import Record 
+from ..core.record import IndexRecord 
 
 
 class Node:
@@ -89,9 +89,7 @@ class BPlusTreeUnclusteredIndex:
         self._write_page(1, root)
 
     def _write_metadata(self):
-        """Escribe metadata en los primeros 16 bytes del archivo"""
         try:
-            # Asegurar que el archivo existe
             if not os.path.exists(self.file_path):
                 with open(self.file_path, 'wb') as f:
                     f.write(b'\x00' * 16)
@@ -105,7 +103,6 @@ class BPlusTreeUnclusteredIndex:
             print(f"Error writing metadata: {e}")
 
     def _read_metadata(self):
-        """Lee metadata desde los primeros 16 bytes del archivo"""
         try:
             if os.path.exists(self.file_path):
                 with open(self.file_path, 'rb') as f:
@@ -116,7 +113,6 @@ class BPlusTreeUnclusteredIndex:
                         self.root_page_id = int.from_bytes(root_bytes, 'little')
                         self.next_page_id = int.from_bytes(next_bytes, 'little')
                     else:
-                        # Metadata corrupta, usar defaults
                         self.root_page_id = 1
                         self.next_page_id = 2
             else:
@@ -214,24 +210,25 @@ class BPlusTreeUnclusteredIndex:
         
         primary_keys = []
         while pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
-            primary_keys.append(leaf_node.values[pos])
+            # Extract the primary_key value from PrimaryKeyPointer
+            primary_keys.append(leaf_node.values[pos].primary_key)
             pos += 1
-        
+
         return self.performance.end_operation(primary_keys)
 
-    def insert(self, record: Record) -> OperationResult:
-        
+    def insert(self, index_record : IndexRecord) -> OperationResult:
+
         self.performance.start_operation()
-        
-        secondary_key = self.get_key_value(record)
-        primary_key = record.get_key()
-        
+
+        secondary_key = index_record.index_value
+        primary_key = index_record.primary_key
+
         primary_key_pointer = PrimaryKeyPointer(primary_key)
-        
+
         self._read_metadata()
         root = self._read_page(self.root_page_id)
         self._insert_recursive(root, secondary_key, primary_key_pointer)
-        
+
         return self.performance.end_operation(True)
 
     def _insert_recursive(self, node: Node, key: Any, primary_key_pointer: PrimaryKeyPointer):
@@ -250,14 +247,15 @@ class BPlusTreeUnclusteredIndex:
             child = self._read_page(child_id)
             self._insert_recursive(child, key, primary_key_pointer)
 
-    def delete(self, record: Record) -> OperationResult:
+    def delete(self, secondary_key: Any, primary_key: Any = None) -> OperationResult:
         self.performance.start_operation()
-        
-        secondary_key = self.get_key_value(record)
-        primary_key = record.get_key()
-        
-        result = self._delete_by_keys(secondary_key, primary_key)
-        return self.performance.end_operation(result)
+
+        if primary_key is not None:
+            result = self._delete_by_keys(secondary_key, primary_key)
+            return self.performance.end_operation(result)
+        else:
+            result = self._delete_all_by_secondary_key(secondary_key)
+            return self.performance.end_operation(result)
 
     def _delete_by_keys(self, secondary_key: Any, primary_key: Any) -> bool:
         self._read_metadata()
@@ -287,6 +285,38 @@ class BPlusTreeUnclusteredIndex:
 
         return False
 
+    def _delete_all_by_secondary_key(self, secondary_key: Any) -> list:
+        self._read_metadata()
+        deleted_pks = []
+        leaf = self._find_leaf_node(secondary_key)
+
+        indices_to_delete = []
+        for i, (key, value) in enumerate(zip(leaf.keys, leaf.values)):
+            if key == secondary_key:
+                indices_to_delete.append(i)
+                deleted_pks.append(value.primary_key)
+
+        for i in reversed(indices_to_delete):
+            leaf.keys.pop(i)
+            leaf.values.pop(i)
+
+        if indices_to_delete:
+            self._write_page(leaf.page_id, leaf)
+
+            if leaf.page_id != self.root_page_id and leaf.is_underflow(self.min_keys):
+                self._handle_leaf_underflow(leaf)
+
+            root = self._read_page(self.root_page_id)
+            if isinstance(root, InternalNode) and len(root.keys) == 0:
+                if len(root.children_ids) > 0:
+                    self.root_page_id = root.children_ids[0]
+                    new_root = self._read_page(self.root_page_id)
+                    new_root.parent_id = None
+                    self._write_page(self.root_page_id, new_root)
+                    self._write_metadata()
+
+        return deleted_pks
+
     def range_search(self, start_key: Any, end_key: Any) -> OperationResult:
        
         self.performance.start_operation()
@@ -302,7 +332,8 @@ class BPlusTreeUnclusteredIndex:
                 if leaf.keys[i] > end_key:
                     return self.performance.end_operation(results)
                 if leaf.keys[i] >= start_key:
-                    results.append(leaf.values[i])
+                    # Extract the primary_key value from PrimaryKeyPointer
+                    results.append(leaf.values[i].primary_key)
             
             if leaf.next_id is not None:
                 leaf = self._read_page(leaf.next_id)
@@ -319,9 +350,6 @@ class BPlusTreeUnclusteredIndex:
             child_id = current.children_ids[pos]
             current = self._read_page(child_id)
         return current
-
-    def get_key_value(self, record) -> Any:
-        return record.get_field_value(self.index_column)
 
     def _split_leaf(self, leaf: LeafNode):
         mid = len(leaf.keys) // 2

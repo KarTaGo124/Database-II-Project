@@ -2,7 +2,7 @@
 import sys
 import os
 import csv
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from indexes.core.database_manager import DatabaseManager
@@ -57,16 +57,19 @@ def load_sales_from_csv(db_manager, table_name, csv_path, max_records=100):
                 )
                 
                 result = db_manager.insert(table_name, record)
-                count += 1
-                
+                if result.data:  # Only count successful inserts
+                    count += 1
+
                 if count % 20 == 0:
                     print(f"  Loaded {count} records | R/W: {result.disk_reads}/{result.disk_writes}")
                     
             except Exception as e:
                 print(f"  Error loading row: {e}")
-                continue
+                import traceback
+                traceback.print_exc()
+                break  # Stop after first error to see it clearly
     
-    print(f"\n✓ Total records loaded: {count}")
+    print(f"\n[OK] Total records loaded: {count}")
     return count
 
 def test_search_operations(db_manager, table_name):
@@ -139,7 +142,7 @@ def main():
     
     print("\nCreating table 'sales' with B+ Tree Clustered Index...")
     db_manager.create_table(table, primary_index_type="BTREE")
-    print("✓ Table created with B+ Tree (Primary/Clustered)")
+    print("[OK] Table created with B+ Tree (Primary/Clustered)")
     
     load_sales_from_csv(db_manager, "sales", csv_path, max_records=100)
     
