@@ -25,6 +25,8 @@ class Bucket:
 
     @classmethod
     def read_bucket(cls, bucket_pos, bucketfile, index_record_template, performance):
+        if bucket_pos == -1:
+            return None
         bucketfile.seek(bucket_pos)
         bucket_size = cls.HEADER_SIZE + (BLOCK_FACTOR * index_record_template.RECORD_SIZE)
         bucket_data = bucketfile.read(bucket_size)
@@ -242,12 +244,7 @@ class ExtendibleHashing:
             # Liberar bucket si está completamente vacío
             if bucket.num_records == 0:
                 if bucket.next_overflow_bucket != -1:
-                    next_bucket = Bucket.read_bucket(bucket.next_overflow_bucket, bucketfile,
-                                                     self.index_record_template, self.performance)
-                    if next_bucket.num_records > 0:
                         self._overflow_to_main_bucket(bucket, bucket_pos, dirfile, bucketfile)
-                    else:
-                        self._handle_empty_bucket(bucket, bucket_pos, dirfile, bucketfile)
                 else:
                     self._handle_empty_bucket(bucket, bucket_pos, dirfile, bucketfile)
 
@@ -323,7 +320,7 @@ class ExtendibleHashing:
                 break
 
         if empty_index is None:
-            return  # no directory entry found — nothing to redirect
+            return  # no directory entry found — nothing to redirect case for overflow!!
 
         mask = 1 << (empty_bucket.local_depth - 1)
         sibling_index = empty_index ^ mask
@@ -544,15 +541,24 @@ class ExtendibleHashing:
             next_bucket = Bucket.read_bucket(next_pos, bucketfile, self.index_record_template, self.performance)
 
             while next_bucket.num_records > 0:
-                for rec in next_bucket.records[:]:
+                for rec in next_bucket.records:
                     delete_result = next_bucket.delete(rec.index_value, next_pos, bucketfile)
-                    insert_result = curr.insert(rec, curr_pos, bucketfile)
+                    insert_result = self.insert(rec)
 
                 if next_bucket.next_overflow_bucket != -1:
                     next_pos = next_bucket.next_overflow_bucket
                     next_bucket = Bucket.read_bucket(next_pos, bucketfile, self.index_record_template, self.performance)
                 else:
                     break
+
+            next_pos = curr.next_overflow_bucket
+            next_bucket = Bucket.read_bucket(next_pos, bucketfile, self.index_record_template, self.performance)
+            while next_bucket is not None:
+                temp_pos = next_pos
+                next_pos = next_bucket.next_overflow_bucket
+                if next_bucket.num_records == 0:
+                    self.free_bucket(temp_pos, bucketfile) #overflow dont need to redirect
+                next_bucket = Bucket.read_bucket(next_pos, bucketfile, self.index_record_template, self.performance)
 
             if curr.num_records == 0:
                 self._handle_empty_bucket(curr, curr_pos, dirfile, bucketfile)
