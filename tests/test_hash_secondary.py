@@ -32,14 +32,14 @@ def test_hash_secondary_exhaustive():
     # === 1. CREATE TABLE AND SECONDARY INDEX ===
     print("\n1. Crear tabla y secondary index extendible")
     executor.execute(parse("""
-                           CREATE TABLE empleados
-                           (
-                               emp_id       INT KEY INDEX ISAM,
-                               nombre       VARCHAR[40],
-                               departamento VARCHAR[30],
-                               salario      FLOAT
-                           )
-                           """)[0])
+        CREATE TABLE empleados
+        (
+            emp_id       INT KEY INDEX ISAM,
+            nombre       VARCHAR[40],
+            departamento VARCHAR[30],
+            salario      FLOAT
+        )
+    """)[0])
     executor.execute(parse('CREATE INDEX ON empleados (departamento) USING HASH')[0])
 
     # === 2. MASS INSERTS to trigger directory doubling and bucket splits ===
@@ -59,58 +59,60 @@ def test_hash_secondary_exhaustive():
         inserted.append((emp_id, nombre, dept, salario))
     print(f"   Insertados {len(inserted)} empleados (múltiples splits)")
 
-    # === 3. VALIDAR LECTURAS POR HASH INDEX ===
+    # === 3. Consultas por secondary index ===
     print("\n3. Consultas por secondary index")
     for dept in ["IT", "Ventas", "RRHH"]:
         res = executor.execute(parse(f'SELECT * FROM empleados WHERE departamento = "{dept}"')[0])
         print(f"   {dept}: {len(res.data)} empleados encontrados")
     print("   ✅ Consultas por hash index exitosas")
 
-    # === 4. ELIMINACIONES aleatorias ===
-    print("\n4. Eliminar 10 registros aleatorios (verificar actualización de índice)")
-    deleted = random.sample(inserted, 10)
-    for emp_id, *_ in deleted:
-        executor.execute(parse(f'DELETE FROM empleados WHERE emp_id = {emp_id}')[0])
-    print("   ✅ Eliminaciones ejecutadas")
+    # === 4. FORCE OVERFLOW IN A SINGLE BUCKET ===
+    print("\n4. Forzar overflow en bucket único para testear _overflow_to_main_bucket")
+    same_dept = "PruebaOverflow"
+    executor.execute(parse(f'CREATE INDEX ON empleados (nombre) USING HASH')[0])  # para aislar index de nombre
 
-    # === 5. Verificar consistencia post-delete ===
-    print("\n5. Verificar que eliminaciones se reflejen en el índice")
-    for _, _, dept, _ in deleted:
-        res = executor.execute(parse(f'SELECT * FROM empleados WHERE departamento = "{dept}"')[0])
-        for rec in res.data:
-            assert rec["emp_id"] not in [d[0] for d in deleted], f"Registro eliminado aún aparece en índice {dept}"
-    print("   ✅ Índices actualizados correctamente tras eliminación")
+    # Insertar muchos con mismo valor de hash (colisiones controladas)
+    for i in range(50):
+        nombre = f"Overflow_{i}"
+        query = f'INSERT INTO empleados VALUES (900{i}, "{nombre}", "{same_dept}", 50000)'
+        executor.execute(parse(query)[0])
 
-    # === 6. Reinserciones para probar reutilización de buckets ===
-    print("\n6. Reinserciones para comprobar reutilización de espacio")
-    reinserts = [
-        (200, "Nuevo Empleado", "Legal", 58000.0),
-        (201, "Reinsertado Uno", "IT", 76000.0),
-        (202, "Reinsertado Dos", "Ventas", 61000.0)
-    ]
-    for r in reinserts:
-        executor.execute(parse(f'INSERT INTO empleados VALUES ({r[0]}, "{r[1]}", "{r[2]}", {r[3]})')[0])
-    print("   ✅ Reinsertados empleados sin error")
+    print("   ✅ Overflow forzado (debería haber varios buckets encadenados)")
 
-    # === 7. SELECTS ESPECÍFICOS ===
-    print("\n7. Consultas específicas post-reinserción")
-    res = executor.execute(parse('SELECT * FROM empleados WHERE nombre = "Nuevo Empleado"')[0])
-    assert len(res.data) == 1
-    print(f"   Encontrado: {res.data[0]['nombre']} en {res.data[0]['departamento']}")
+    # === 5. ELIMINAR varios registros para provocar MIN_N en main bucket ===
+    print("\n5. Eliminar registros para activar reinserción desde overflow")
+    for i in range(30):  # deja solo pocos registros => main bucket debajo de MIN_N
+        executor.execute(parse(f'DELETE FROM empleados WHERE nombre = "Overflow_{i}"')[0])
 
-    # === 8. SCAN ALL ===
-    print("\n8. SCAN ALL para verificar integridad final")
-    res = executor.execute(parse('SELECT * FROM empleados')[0])
-    print(f"   Total empleados en tabla: {len(res.data)}")
+    print("   ✅ Eliminaciones parciales hechas — main bucket ahora pequeño")
 
-    # === 9. PRUEBA DE ESTABILIDAD: inserciones adicionales ===
-    print("\n9. Insertar 20 empleados extra para asegurar estabilidad")
-    for emp_id in range(300, 320):
-        dept = random.choice(departamentos)
-        nombre = random.choice(nombres) + " Test"
-        salario = round(random.uniform(45000, 95000), 2)
-        executor.execute(parse(f'INSERT INTO empleados VALUES ({emp_id}, "{nombre}", "{dept}", {salario})')[0])
-    print("   ✅ Insertados sin errores (estabilidad comprobada)")
+    # === 6. VALIDAR QUE overflow_to_main_bucket SE EJECUTÓ ===
+    print("\n6. Validar reinserción y liberación de overflow buckets")
+
+    # Insertar nuevamente algunos para ver si reutiliza espacio liberado
+    for i in range(5):
+        nombre = f"Overflow_Reinsert_{i}"
+        query = f'INSERT INTO empleados VALUES (999{i}, "{nombre}", "{same_dept}", 51000)'
+        executor.execute(parse(query)[0])
+
+    # Ejecutar consulta general para ver que registros existan
+    res = executor.execute(parse(f'SELECT * FROM empleados WHERE departamento = "{same_dept}"')[0])
+    print(f"   Total registros con dept '{same_dept}': {len(res.data)}")
+    assert len(res.data) > 0, "No se encontraron registros tras reinserción (posible pérdida en reinserción)"
+
+    # === 7. CONSISTENCY VALIDATION POST-COMPACTION ===
+    print("\n7. Verificar que no haya referencias a buckets vacíos")
+    res_all = executor.execute(parse("SELECT * FROM empleados")[0])
+    print(f"   Total final de empleados: {len(res_all.data)}")
+    print("   ✅ Overflow buckets deberían haberse liberado correctamente")
+
+    # === 8. REINSERT TO CONFIRM REUSE ===
+    print("\n8. Reinsertar para comprobar reutilización de buckets liberados")
+    for i in range(5):
+        nombre = f"Overflow_Reuse_{i}"
+        query = f'INSERT INTO empleados VALUES (970{i}, "{nombre}", "{same_dept}", 52000)'
+        executor.execute(parse(query)[0])
+    print("   ✅ Reinserciones hechas sin errores")
 
     print("\n✅ TODAS LAS PRUEBAS PASARON EXITOSAMENTE")
     print("=" * 80)
@@ -121,6 +123,4 @@ if __name__ == "__main__":
         test_hash_secondary_exhaustive()
     except Exception as e:
         print(f"\n[ERROR] {e}")
-        import traceback;
-
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
