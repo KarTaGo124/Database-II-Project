@@ -20,7 +20,8 @@ class DatabaseManager:
 
     def __init__(self, database_name: str = None):
         self.tables = {}
-        self.base_dir = os.path.join("data", "database")
+        self.database_name = database_name or "default"
+        self.base_dir = os.path.join("data", "databases", self.database_name)
         os.makedirs(self.base_dir, exist_ok=True)
 
     def create_table(self, table: Table, primary_index_type: str = "ISAM", csv_filename: str = None):
@@ -155,8 +156,9 @@ class DatabaseManager:
             raise ValueError(f"Table {table_name} does not exist")
 
         table_info = self.tables[table_name]
+        table = table_info["table"]
 
-        if field_name is None:
+        if field_name is None or field_name == table.key_field:
             primary_index = table_info["primary_index"]
             result = primary_index.search(value)
             if result.data:
@@ -243,8 +245,9 @@ class DatabaseManager:
             raise ValueError(f"Table {table_name} does not exist")
 
         table_info = self.tables[table_name]
+        table = table_info["table"]
 
-        if field_name is None:
+        if field_name is None or field_name == table.key_field:
             primary_index = table_info["primary_index"]
             return primary_index.range_search(start_key, end_key)
 
@@ -772,7 +775,7 @@ class DatabaseManager:
             os.makedirs(primary_dir, exist_ok=True)
             primary_filename = os.path.join(primary_dir, "btree_clustered")
             return BPlusTreeClusteredIndex(
-                order=4,
+                order=50,
                 key_column=table.key_field,
                 file_path=primary_filename,
                 record_class=Record
