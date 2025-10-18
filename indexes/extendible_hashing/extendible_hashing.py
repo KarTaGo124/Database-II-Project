@@ -4,8 +4,9 @@ import hashlib
 from ..core.record import IndexRecord
 from ..core.performance_tracker import PerformanceTracker
 
-BLOCK_FACTOR = 8
+BLOCK_FACTOR = 20
 MAX_OVERFLOW = 2
+MIN_N = BLOCK_FACTOR/2
 
 
 class Bucket:
@@ -241,8 +242,8 @@ class ExtendibleHashing:
             delete_result = bucket.delete(secondary_value, bucket_pos, bucketfile, primary_key)
             deleted_pks = delete_result.data
 
-            # Liberar bucket si está completamente vacío
-            if bucket.num_records == 0:
+            # Liberar bucket esta medio vacio
+            if bucket.num_records <= MIN_N:
                 if bucket.next_overflow_bucket != -1:
                         self._overflow_to_main_bucket(bucket, bucket_pos, dirfile, bucketfile)
                 else:
