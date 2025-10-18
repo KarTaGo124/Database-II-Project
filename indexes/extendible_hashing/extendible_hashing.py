@@ -246,7 +246,7 @@ class ExtendibleHashing:
             if bucket.num_records <= MIN_N:
                 if bucket.next_overflow_bucket != -1:
                         self._overflow_to_main_bucket(bucket, bucket_pos, dirfile, bucketfile)
-                else:
+                elif bucket.num_records == 0:
                     self._handle_empty_bucket(bucket, bucket_pos, dirfile, bucketfile)
 
             if primary_key is None:
