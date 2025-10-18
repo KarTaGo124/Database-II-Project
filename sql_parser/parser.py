@@ -118,6 +118,8 @@ class _T(Transformer):
         if len(items) > 2:
             mappings = {}
             for mapping in items[2:]:
+                if mapping is None:
+                    continue
                 array_field = mapping[0]
                 csv_columns = mapping[1]
                 mappings[array_field] = csv_columns

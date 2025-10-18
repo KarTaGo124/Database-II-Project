@@ -66,8 +66,8 @@ class Executor:
             pk_col = columns[0]
         pk_name = pk_col.name
         idx_decl = (pk_col.index or "ISAM").upper()
-        allowed_primary = {"ISAM", "SEQUENTIAL"}
-        primary_index_type = idx_decl if idx_decl in allowed_primary else "ISAM"
+        allowed_primary = {"ISAM", "SEQUENTIAL", "BTREE"}
+        primary_index_type = idx_decl if idx_decl in allowed_primary else "BTREE"
         return pk_name, primary_index_type
 
     # ====== CREATE TABLE ======
@@ -212,6 +212,8 @@ class Executor:
         key_field = table_obj.key_field
 
         inserted = duplicates = cast_err = 0
+        total_reads = total_writes = 0
+        total_time_ms = 0.0
 
         with open(plan.filepath, "r", encoding="utf-8", newline="") as fh_probe:
             first_line = fh_probe.readline()
@@ -285,6 +287,10 @@ class Executor:
 
                 try:
                     res = self.db.insert(plan.table, rec)
+                    total_reads += res.disk_reads
+                    total_writes += res.disk_writes
+                    total_time_ms += res.execution_time_ms
+
                     if hasattr(res, "data") and (res.data is False):
                         duplicates += 1
                     else:
@@ -293,7 +299,8 @@ class Executor:
                     cast_err += 1
                     continue
 
-        return OperationResult(f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}", 0, 0, 0)
+        summary = f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}"
+        return OperationResult(summary, total_time_ms, total_reads, total_writes)
 
     # ====== SELECT ======
     def _get_ftype(self, table: str, col: str) -> Optional[str]:
