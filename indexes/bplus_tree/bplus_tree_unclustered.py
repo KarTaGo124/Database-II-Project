@@ -3,7 +3,7 @@ import bisect
 import pickle
 import os
 from ..core.performance_tracker import PerformanceTracker, OperationResult
-from ..core.record import Record 
+from ..core.record import IndexRecord 
 
 
 class Node:
@@ -54,7 +54,7 @@ class PrimaryKeyPointer:
 
 
 class BPlusTreeUnclusteredIndex:
-    
+
     def __init__(self, order: int, index_column: str, file_path: str):
         self.index_column = index_column
         self.order = order
@@ -66,43 +66,75 @@ class BPlusTreeUnclusteredIndex:
 
         self.performance = PerformanceTracker()
 
-        self.next_page_id = 1
-        self.root_page_id = 0
-
-        self._initialize_file()
-        
-    def _initialize_file(self):
         if not os.path.exists(self.file_path):
-            root = LeafNode()
-            root.page_id = 0
-            self._write_page(0, root)
-            self._write_metadata()
-    
-    def _write_metadata(self):
-        with open(self.file_path, 'r+b') as f:
-            f.seek(0)
+            # Crear archivo nuevo
+            self.next_page_id = 2  # Página 1 será la raíz
+            self.root_page_id = 1
+            self._initialize_file()
+        else:
+            # Leer metadata existente
+            self._read_metadata()
+
+    def _initialize_file(self):
+        """Inicializa archivo nuevo con metadata y raíz"""
+        # Crear archivo con página de metadata (primeros 16 bytes)
+        with open(self.file_path, 'wb') as f:
+            # Escribir metadata inicial
             f.write(self.root_page_id.to_bytes(8, 'little'))
             f.write(self.next_page_id.to_bytes(8, 'little'))
-    
-    def _read_metadata(self):
-        if os.path.exists(self.file_path):
-            with open(self.file_path, 'rb') as f:
+
+        # Crear raíz inicial (hoja) en página 1
+        root = LeafNode()
+        root.page_id = 1
+        self._write_page(1, root)
+
+    def _write_metadata(self):
+        try:
+            if not os.path.exists(self.file_path):
+                with open(self.file_path, 'wb') as f:
+                    f.write(b'\x00' * 16)
+
+            with open(self.file_path, 'r+b') as f:
                 f.seek(0)
-                root_bytes = f.read(8)
-                next_bytes = f.read(8)
-                if len(root_bytes) == 8 and len(next_bytes) == 8:
-                    self.root_page_id = int.from_bytes(root_bytes, 'little')
-                    self.next_page_id = int.from_bytes(next_bytes, 'little')
+                f.write(self.root_page_id.to_bytes(8, 'little'))
+                f.write(self.next_page_id.to_bytes(8, 'little'))
+                f.flush()
+        except Exception as e:
+            print(f"Error writing metadata: {e}")
+
+    def _read_metadata(self):
+        try:
+            if os.path.exists(self.file_path):
+                with open(self.file_path, 'rb') as f:
+                    f.seek(0)
+                    root_bytes = f.read(8)
+                    next_bytes = f.read(8)
+                    if len(root_bytes) == 8 and len(next_bytes) == 8:
+                        self.root_page_id = int.from_bytes(root_bytes, 'little')
+                        self.next_page_id = int.from_bytes(next_bytes, 'little')
+                    else:
+                        self.root_page_id = 1
+                        self.next_page_id = 2
+            else:
+                self.root_page_id = 1
+                self.next_page_id = 2
+        except Exception as e:
+            print(f"Error reading metadata: {e}")
+            self.root_page_id = 1
+            self.next_page_id = 2
     
     def _get_page_offset(self, page_id: int) -> int:
         return 16 + (page_id * self.page_size) 
     
     def _read_page(self, page_id: int) -> Optional[Node]:
+        if page_id is None or page_id < 1:  # Página 0 es metadata
+            return None
+
         self.performance.track_read()
-        
+
         if not os.path.exists(self.file_path):
             return None
-        
+
         try:
             with open(self.file_path, 'rb') as f:
                 offset = self._get_page_offset(page_id)
@@ -112,17 +144,27 @@ class BPlusTreeUnclusteredIndex:
                 if len(page_data) < self.page_size:
                     return None
 
+                # Verificar si la página está vacía
+                if page_data == b'\x00' * self.page_size:
+                    return None
+
                 node = pickle.loads(page_data.rstrip(b'\x00'))
                 node.page_id = page_id
                 return node
         except (EOFError, pickle.UnpicklingError, OSError):
             return None
-    
+
     def _write_page(self, page_id: int, node: Node):
+        if page_id < 1:  # No permitir escribir en página 0 (metadata)
+            raise Exception("Cannot write to page 0 (metadata page)")
+
         self.performance.track_write()
-        
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-        
+
+        # Asegurar que el directorio existe
+        dir_path = os.path.dirname(self.file_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+
         node.page_id = page_id
         serialized = pickle.dumps(node)
 
@@ -130,11 +172,27 @@ class BPlusTreeUnclusteredIndex:
             raise Exception(f"Page {page_id} too large: {len(serialized)} > {self.page_size}")
 
         padded_data = serialized + b'\x00' * (self.page_size - len(serialized))
-        
-        with open(self.file_path, 'r+b' if os.path.exists(self.file_path) else 'w+b') as f:
-            offset = self._get_page_offset(page_id)
+
+        # Asegurar que el archivo existe con metadata
+        if not os.path.exists(self.file_path):
+            with open(self.file_path, 'wb') as f:
+                f.write(b'\x00' * 16)  # Metadata vacía
+
+        # Calcular tamaño necesario del archivo
+        offset = self._get_page_offset(page_id)
+        required_size = offset + self.page_size
+
+        # Extender archivo si es necesario
+        current_size = os.path.getsize(self.file_path)
+        if current_size < required_size:
+            with open(self.file_path, 'ab') as f:
+                f.write(b'\x00' * (required_size - current_size))
+
+        # Escribir página
+        with open(self.file_path, 'r+b') as f:
             f.seek(offset)
             f.write(padded_data)
+            f.flush()
     
     def _allocate_page_id(self) -> int:
         page_id = self.next_page_id
@@ -152,24 +210,25 @@ class BPlusTreeUnclusteredIndex:
         
         primary_keys = []
         while pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
-            primary_keys.append(leaf_node.values[pos])
+            # Extract the primary_key value from PrimaryKeyPointer
+            primary_keys.append(leaf_node.values[pos].primary_key)
             pos += 1
-        
+
         return self.performance.end_operation(primary_keys)
 
-    def insert(self, record: Record) -> OperationResult:
-        
+    def insert(self, index_record : IndexRecord) -> OperationResult:
+
         self.performance.start_operation()
-        
-        secondary_key = self.get_key_value(record)
-        primary_key = record.get_key()
-        
+
+        secondary_key = index_record.index_value
+        primary_key = index_record.primary_key
+
         primary_key_pointer = PrimaryKeyPointer(primary_key)
-        
+
         self._read_metadata()
         root = self._read_page(self.root_page_id)
         self._insert_recursive(root, secondary_key, primary_key_pointer)
-        
+
         return self.performance.end_operation(True)
 
     def _insert_recursive(self, node: Node, key: Any, primary_key_pointer: PrimaryKeyPointer):
@@ -188,28 +247,30 @@ class BPlusTreeUnclusteredIndex:
             child = self._read_page(child_id)
             self._insert_recursive(child, key, primary_key_pointer)
 
-    def delete(self, record: Record) -> OperationResult:
+    def delete(self, secondary_key: Any, primary_key: Any = None) -> OperationResult:
         self.performance.start_operation()
-        
-        secondary_key = self.get_key_value(record)
-        primary_key = record.get_key()
-        
-        result = self._delete_by_keys(secondary_key, primary_key)
-        return self.performance.end_operation(result)
+
+        if primary_key is not None:
+            result = self._delete_by_keys(secondary_key, primary_key)
+            return self.performance.end_operation(result)
+        else:
+            result = self._delete_all_by_secondary_key(secondary_key)
+            return self.performance.end_operation(result)
 
     def _delete_by_keys(self, secondary_key: Any, primary_key: Any) -> bool:
         self._read_metadata()
         leaf = self._find_leaf_node(secondary_key)
-        
+
         for i, (key, value) in enumerate(zip(leaf.keys, leaf.values)):
             if key == secondary_key and value.primary_key == primary_key:
                 leaf.keys.pop(i)
                 leaf.values.pop(i)
                 self._write_page(leaf.page_id, leaf)
-                
+
                 if leaf.page_id != self.root_page_id and leaf.is_underflow(self.min_keys):
                     self._handle_leaf_underflow(leaf)
-                
+
+                # Verificar si la raíz necesita reducirse
                 root = self._read_page(self.root_page_id)
                 if isinstance(root, InternalNode) and len(root.keys) == 0:
                     if len(root.children_ids) > 0:
@@ -217,11 +278,44 @@ class BPlusTreeUnclusteredIndex:
                         new_root = self._read_page(self.root_page_id)
                         new_root.parent_id = None
                         self._write_page(self.root_page_id, new_root)
+                        # Persistir cambio de raíz
                         self._write_metadata()
-                
+
                 return True
-        
+
         return False
+
+    def _delete_all_by_secondary_key(self, secondary_key: Any) -> list:
+        self._read_metadata()
+        deleted_pks = []
+        leaf = self._find_leaf_node(secondary_key)
+
+        indices_to_delete = []
+        for i, (key, value) in enumerate(zip(leaf.keys, leaf.values)):
+            if key == secondary_key:
+                indices_to_delete.append(i)
+                deleted_pks.append(value.primary_key)
+
+        for i in reversed(indices_to_delete):
+            leaf.keys.pop(i)
+            leaf.values.pop(i)
+
+        if indices_to_delete:
+            self._write_page(leaf.page_id, leaf)
+
+            if leaf.page_id != self.root_page_id and leaf.is_underflow(self.min_keys):
+                self._handle_leaf_underflow(leaf)
+
+            root = self._read_page(self.root_page_id)
+            if isinstance(root, InternalNode) and len(root.keys) == 0:
+                if len(root.children_ids) > 0:
+                    self.root_page_id = root.children_ids[0]
+                    new_root = self._read_page(self.root_page_id)
+                    new_root.parent_id = None
+                    self._write_page(self.root_page_id, new_root)
+                    self._write_metadata()
+
+        return deleted_pks
 
     def range_search(self, start_key: Any, end_key: Any) -> OperationResult:
        
@@ -238,7 +332,8 @@ class BPlusTreeUnclusteredIndex:
                 if leaf.keys[i] > end_key:
                     return self.performance.end_operation(results)
                 if leaf.keys[i] >= start_key:
-                    results.append(leaf.values[i])
+                    # Extract the primary_key value from PrimaryKeyPointer
+                    results.append(leaf.values[i].primary_key)
             
             if leaf.next_id is not None:
                 leaf = self._read_page(leaf.next_id)
@@ -255,9 +350,6 @@ class BPlusTreeUnclusteredIndex:
             child_id = current.children_ids[pos]
             current = self._read_page(child_id)
         return current
-
-    def get_key_value(self, record) -> Any:
-        return record.get_field_value(self.index_column)
 
     def _split_leaf(self, leaf: LeafNode):
         mid = len(leaf.keys) // 2
@@ -396,12 +488,17 @@ class BPlusTreeUnclusteredIndex:
     def _borrow_from_right_leaf(self, leaf: LeafNode, right_sibling: LeafNode, parent: InternalNode, leaf_index: int):
         borrowed_key = right_sibling.keys.pop(0)
         borrowed_value = right_sibling.values.pop(0)
-        
+
         leaf.keys.append(borrowed_key)
         leaf.values.append(borrowed_value)
-        
-        parent.keys[leaf_index] = right_sibling.keys[0] if right_sibling.keys else borrowed_key
-        
+
+        # Actualizar separador: debe ser la primera clave del hijo derecho
+        if len(right_sibling.keys) > 0:
+            parent.keys[leaf_index] = right_sibling.keys[0]
+        else:
+            # No debería ocurrir si min_keys > 0
+            raise Exception("Right sibling became empty after borrowing")
+
         self._write_page(leaf.page_id, leaf)
         self._write_page(right_sibling.page_id, right_sibling)
         self._write_page(parent.page_id, parent)
@@ -564,11 +661,10 @@ class BPlusTreeUnclusteredIndex:
     def clear(self):
         if os.path.exists(self.file_path):
             os.remove(self.file_path)
-        
-        self.next_page_id = 1
-        self.root_page_id = 0
-        
-        root = LeafNode()
-        root.page_id = 0
-        self._write_page(0, root)
-        self._write_metadata()
+
+        # Reiniciar metadata
+        self.next_page_id = 2
+        self.root_page_id = 1
+
+        # Reinicializar archivo
+        self._initialize_file()

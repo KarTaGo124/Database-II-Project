@@ -2,7 +2,7 @@
 import sys
 import os
 import csv
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from indexes.core.database_manager import DatabaseManager
@@ -76,8 +76,8 @@ def test_secondary_index_search(db_manager, table_name):
     
     # Test 1: Search by product name
     print("\n1. Search by product_name='Drone':")
-    print("   Step 1: Search unclustered index (product_name → sale_id)")
-    print("   Step 2: Search clustered index (sale_id → full record)")
+    print("   Step 1: Search unclustered index (product_name -> sale_id)")
+    print("   Step 2: Search clustered index (sale_id -> full record)")
     result = db_manager.search(table_name, b"Drone", field_name="product_name")
     if result.data:
         print(f"   Found {len(result.data)} record(s):")
@@ -131,9 +131,9 @@ def test_direct_vs_secondary_search(db_manager, table_name):
         print(f"     Single-step lookup")
         print(f"     Performance: {direct_result.execution_time_ms:.2f}ms | Disk R/W: {direct_result.disk_reads}/{direct_result.disk_writes}")
         
-        print("\n  B) Search by product_name (Secondary → Primary):")
+        print("\n  B) Search by product_name (Secondary -> Primary):")
         secondary_result = db_manager.search(table_name, b"Telescopio Digital", field_name="product_name")
-        print(f"     Two-step lookup (unclustered → clustered)")
+        print(f"     Two-step lookup (unclustered -> clustered)")
         print(f"     Performance: {secondary_result.execution_time_ms:.2f}ms | Disk R/W: {secondary_result.disk_reads}/{secondary_result.disk_writes}")
         
         print(f"\n  Analysis:")
@@ -156,7 +156,7 @@ def main():
     
     print("\nCreating table 'sales' with B+ Tree Clustered Index (Primary)...")
     db_manager.create_table(table, primary_index_type="BTREE")
-    print("✓ Table created with B+ Tree (Clustered)")
+    print("[OK] Table created with B+ Tree (Clustered)")
     
     load_sales_from_csv(db_manager, "sales", csv_path, max_records=100)
     
@@ -164,8 +164,8 @@ def main():
     print("Creating Secondary B+ Tree Index on 'product_name'...")
     print(f"{'='*60}")
     db_manager.create_index("sales", "product_name", "BTREE", scan_existing=True)
-    print("✓ Secondary index created and populated")
-    print("  Index type: B+ Tree Unclustered (stores product_name → sale_id)")
+    print("[OK] Secondary index created and populated")
+    print("  Index type: B+ Tree Unclustered (stores product_name -> sale_id)")
     
     test_secondary_index_search(db_manager, "sales")
     test_direct_vs_secondary_search(db_manager, "sales")
