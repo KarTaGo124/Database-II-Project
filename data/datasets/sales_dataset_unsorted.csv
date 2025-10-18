@@ -1,4 +1,4 @@
-﻿ID de la venta;Nombre producto;Cantidad vendida;Precio unitario;Fecha de venta
+﻿ID;Nombre;Cantidad;Precio;Fecha
 403;Drone;2;1890.45;24/10/2024
 56;Telescopio Digital;11;904.34;27/05/2024
 107;Ebook Reader;19;1914.64;27/05/2024

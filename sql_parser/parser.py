@@ -6,7 +6,7 @@ from .plan_types import (
     PredicateEq, PredicateBetween, PredicateInPointRadius, PredicateKNN,
 )
 
-from lark import Lark, Transformer, Token
+from lark import Lark, Transformer, Token, Tree
 from typing import Any, List
 
 # Cargar gramática desde archivo grammar.lark
@@ -57,7 +57,7 @@ class _T(Transformer):
     def string(self, items):
         s = items[0]
         if isinstance(s, Token):
-            # para quitar comillas de ESCAPED_STRING
+            # quitar comillas de ESCAPED_STRING
             return s.value[1:-1]
         return str(s)
 
@@ -65,11 +65,13 @@ class _T(Transformer):
         return items[0]
 
     def null(self, _): return None
-    
+
     def spatial_point(self, items):
+        # por si tu gramática usa esta regla en algún lugar
         return tuple(items)
-    
+
     def array_lit(self, items):
+        # asume que subreglas ya devuelven la lista
         return items[0]
 
     def ident_or_string(self, items):
@@ -112,35 +114,48 @@ class _T(Transformer):
 
     # ==== LOAD DATA FROM FILE ====
     def load_data(self, items):
+        # Formatos soportados:
+        # LOAD DATA FROM FILE "path.csv" INTO ventas
+        # LOAD DATA FROM FILE "path.csv" INTO ventas MAP ( campo:["x","y"], nombre:"Nombre", precio:"Precio" )
         filepath = self.ident_or_string([items[0]])
         table = _tok2str(items[1])
+
         mappings = None
         if len(items) > 2:
-            mappings = {}
+            tmp = {}
+            # items[2:] pueden ser tuplas (campo, lista/str) o a veces Trees/listas según gramática
             for mapping in items[2:]:
                 if mapping is None:
                     continue
-                array_field = mapping[0]
-                csv_columns = mapping[1]
-                mappings[array_field] = csv_columns
+                # normaliza mapeo
+                k, v = self._normalize_pair(mapping)
+                if k is None:
+                    continue
+                tmp[k] = v
+            mappings = tmp or None
+
         return LoadDataPlan(table=table, filepath=filepath, column_mappings=mappings)
-    
+
     def column_mapping(self, items):
+        # Garantiza salida: (str, list[str]) o (str, str) -> la capa superior normaliza a list si corresponde
         array_field = _tok2str(items[0])
-        csv_columns = [_tok2str(item) for item in items[1:]]
+        if len(items) == 2 and isinstance(items[1], list):
+            csv_columns = [_tok2str(it) for it in items[1]]
+        else:
+            csv_columns = [_tok2str(it) for it in items[1:]]
         return (array_field, csv_columns)
 
     # ==== SELECT ====
     def select_all(self, _): return None
+
     def select_cols(self, items):
         cols = items[0]
         return cols if isinstance(cols, list) else [str(cols)]
 
-    # punto (x,y)
     def point(self, items):
-        coords = [float(item) for item in items]
-        return 
-    
+        # tu versión devolvía None; corregido para devolver (x, y)
+        return tuple(float(item) for item in items)
+
     def pred_eq(self, items):
         return PredicateEq(column=str(items[0]), value=items[1])
 
@@ -149,13 +164,13 @@ class _T(Transformer):
 
     def pred_in(self, items):
         col = str(items[0])
-        pt = items[1]
+        pt = items[1]          # (x, y)
         radius = float(items[2])
         return PredicateInPointRadius(column=col, point=pt, radius=radius)
 
     def pred_nearest(self, items):
         col = str(items[0])
-        pt = items[1]            # (x, y)
+        pt = items[1]          # (x, y)
         k = int(items[2])
         return PredicateKNN(column=col, point=pt, k=k)
 
@@ -165,7 +180,6 @@ class _T(Transformer):
         where = items[2] if len(items) > 2 else None
         return SelectPlan(table=table, columns=cols_or_none, where=where)
 
-
     # ==== INSERT ====
     def insert_stmt(self, items):
         table = _tok2str(items[0])
@@ -173,12 +187,10 @@ class _T(Transformer):
         if rest and isinstance(rest[0], list):   # con lista de columnas
             cols = rest[0]
             vals = rest[1:]
-        else:                                     # sin lista de columnas
+        else:                                    # sin lista de columnas
             cols = None
             vals = rest
-
         return InsertPlan(table=table, columns=cols, values=vals)
-
 
     # ==== DELETE ====
     def delete_stmt(self, items):
@@ -205,6 +217,45 @@ class _T(Transformer):
 
     def start(self, items):
         return items
+
+    # ==== helpers internos para MAP(...) ====
+    def _normalize_pair(self, node):
+        """
+        Devuelve (clave:str, valor:list[str] o str) o (None, None) si no se puede normalizar.
+        Acepta:
+          - ('coords', ['x','y'])
+          - ('nombre', ['Nombre'])
+          - ('nombre', 'Nombre')
+          - listas/árboles equivalentes de Lark
+        """
+        # tuple/list de longitud 2
+        if isinstance(node, (list, tuple)) and len(node) == 2:
+            k = _tok2str(node[0])
+            v = node[1]
+            if isinstance(v, (list, tuple)):
+                v2 = [_tok2str(x) for x in v]
+            else:
+                v2 = _tok2str(v)
+            return k, v2
+
+        # dict accidental
+        if isinstance(node, dict):
+            # tomar primer item
+            for k, v in node.items():
+                if isinstance(v, (list, tuple)):
+                    v2 = [_tok2str(x) for x in v]
+                else:
+                    v2 = _tok2str(v)
+                return _tok2str(k), v2
+            return None, None
+
+        # Tree -> intentar con hijos
+        if isinstance(node, Tree) and getattr(node, "children", None):
+            return self._normalize_pair(node.children)
+
+        # Token/cadena suelta no válida
+        return None, None
+
 
 _TRANSFORMER = _T()
 

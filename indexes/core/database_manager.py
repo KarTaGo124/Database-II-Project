@@ -20,8 +20,8 @@ class DatabaseManager:
 
     def __init__(self, database_name: str = None):
         self.tables = {}
-        self.database_name = database_name or "default"
-        self.base_dir = os.path.join("data", "databases", self.database_name)
+        self.database_name = database_name or "default_db"
+        self.base_dir = os.path.join("data", "database")
         os.makedirs(self.base_dir, exist_ok=True)
 
     def create_table(self, table: Table, primary_index_type: str = "ISAM", csv_filename: str = None):
@@ -87,27 +87,60 @@ class DatabaseManager:
             "type": index_type
         }
 
+        # ====== Construcción rápida: ordenar + "bulk mode" para reducir I/O ======
         if scan_existing:
             primary_index = table_info["primary_index"]
             if hasattr(primary_index, 'scan_all'):
                 try:
+                    # 1) Activar modo BULK si el índice lo soporta
+                    if hasattr(secondary_index, "begin_bulk"):
+                        secondary_index.begin_bulk()
+
                     scan_result = primary_index.scan_all()
                     existing_records = scan_result.data
 
                     field_type, field_size = field_info
+
+                    def _sort_key(v):
+                        if v is None:
+                            return (0, "")
+                        if isinstance(v, bytes):
+                            try:
+                                s = v.decode("utf-8", errors="ignore").rstrip("\x00")
+                            except Exception:
+                                s = str(v)
+                            return (1, s)
+                        if isinstance(v, str):
+                            return (1, v)
+                        return (2, v)
+
+                    pairs = []
                     for record in existing_records:
-                        secondary_value = getattr(record, field_name)
-                        primary_key = record.get_key()
+                        raw_val = getattr(record, field_name, None)
+                        if raw_val is None:
+                            continue
+                        # normalizar SIEMPRE la clave secundaria
+                        sec_val = self._normalize_for_field(field_type, field_size, raw_val)
+                        pk = record.get_key()
+                        pairs.append((_sort_key(sec_val), sec_val, pk))
 
+                    pairs.sort(key=lambda t: t[0])
+
+                    for _sk, sec_val, pk in pairs:
                         index_record = IndexRecord(field_type, field_size)
-                        index_record.set_index_data(secondary_value, primary_key)
-
+                        index_record.set_index_data(sec_val, pk)  # sec_val ya normalizado
                         secondary_index.insert(index_record)
+
                 except Exception as e:
+                    # roll back del índice
                     del table_info["secondary_indexes"][field_name]
                     if hasattr(secondary_index, 'drop_index'):
                         secondary_index.drop_index()
                     raise ValueError(f"Error indexing existing records: {e}")
+                finally:
+                    # 2) Cerrar modo BULK (persistir metadata pendiente y flush final)
+                    if hasattr(secondary_index, "end_bulk"):
+                        secondary_index.end_bulk()
 
         return True
 
@@ -135,6 +168,9 @@ class DatabaseManager:
             secondary_value = getattr(record, field_name)
             primary_key = record.get_key()
 
+            # normalizar SIEMPRE la clave secundaria antes de indexar
+            secondary_value = self._normalize_for_field(field_type, field_size, secondary_value)
+
             index_record = IndexRecord(field_type, field_size)
             index_record.set_index_data(secondary_value, primary_key)
 
@@ -156,9 +192,9 @@ class DatabaseManager:
             raise ValueError(f"Table {table_name} does not exist")
 
         table_info = self.tables[table_name]
-        table = table_info["table"]
 
-        if field_name is None or field_name == table.key_field:
+        # === BÚSQUEDA POR PRIMARY KEY ===
+        if field_name is None:
             primary_index = table_info["primary_index"]
             result = primary_index.search(value)
             if result.data:
@@ -166,11 +202,32 @@ class DatabaseManager:
             else:
                 return OperationResult([], result.execution_time_ms, result.disk_reads, result.disk_writes)
 
+        # === BÚSQUEDA POR ÍNDICE SECUNDARIO (si existe) ===
         elif field_name in table_info["secondary_indexes"]:
-            secondary_index = table_info["secondary_indexes"][field_name]["index"]
+            secondary_index_info = table_info["secondary_indexes"][field_name]
+            secondary_index = secondary_index_info["index"]
             primary_index = table_info["primary_index"]
 
-            secondary_result = secondary_index.search(value)
+            # Detectar tipo de campo
+            table = table_info["table"]
+            field_info = self._get_field_info(table, field_name)
+            if not field_info:
+                raise ValueError(f"Field {field_name} not found in table {table_name}")
+            field_type, field_size = field_info
+
+            # Para FLOAT: usar un rango pequeño alrededor del valor (tolerancia a precisión binaria)
+            if field_type == "FLOAT":
+                try:
+                    qv = float(value)
+                except (ValueError, TypeError):
+                    return OperationResult([], 0, 0, 0)
+                EPS = 1e-3  # tolerancia (0.001). Ajustable si lo deseas.
+                secondary_result = secondary_index.range_search(qv - EPS, qv + EPS)
+            else:
+                # Igual que antes para otros tipos (exact match) con normalización
+                norm = self._normalize_for_field(field_type, field_size, value)
+                secondary_result = secondary_index.search(norm)
+
             if not secondary_result.data:
                 breakdown = {
                     "primary_metrics": {"reads": 0, "writes": 0, "time_ms": 0},
@@ -186,57 +243,86 @@ class DatabaseManager:
             primary_lookup_writes = 0
             primary_lookup_time = 0
 
-            if secondary_result.data:
-                matching_records = []
-                for primary_key in secondary_result.data:
-                    primary_result = primary_index.search(primary_key)
-                    primary_lookup_reads += primary_result.disk_reads
-                    primary_lookup_writes += primary_result.disk_writes
-                    primary_lookup_time += primary_result.execution_time_ms
+            matching_records = []
+            for primary_key in secondary_result.data:
+                primary_res = primary_index.search(primary_key)
+                primary_lookup_reads += primary_res.disk_reads
+                primary_lookup_writes += primary_res.disk_writes
+                primary_lookup_time += primary_res.execution_time_ms
+                if primary_res.data:
+                    # Si es FLOAT y pedimos igualdad, filtramos con tolerancia final
+                    if field_type == "FLOAT":
+                        try:
+                            qv = float(value)
+                            rv = float(getattr(primary_res.data, field_name))
+                            if abs(rv - qv) > 1e-3:
+                                continue
+                        except Exception:
+                            continue
+                    matching_records.append(primary_res.data)
 
-                    if primary_result.data:
-                        matching_records.append(primary_result.data)
-
-                total_reads += primary_lookup_reads
-                total_writes += primary_lookup_writes
-                total_time += primary_lookup_time
-            else:
-                matching_records = []
+            total_reads += primary_lookup_reads
+            total_writes += primary_lookup_writes
+            total_time += primary_lookup_time
 
             breakdown = {
                 "primary_metrics": {"reads": primary_lookup_reads, "writes": primary_lookup_writes, "time_ms": primary_lookup_time},
                 "secondary_metrics": {"reads": secondary_result.disk_reads, "writes": secondary_result.disk_writes, "time_ms": secondary_result.execution_time_ms}
             }
-
             return OperationResult(matching_records, total_time, total_reads, total_writes, operation_breakdown=breakdown)
 
+        # === SIN ÍNDICE SECUNDARIO: full scan del primario ===
         else:
             table = table_info["table"]
             field_info = self._get_field_info(table, field_name)
             if not field_info:
                 raise ValueError(f"Field {field_name} not found in table {table_name}")
+            field_type, _ = field_info
 
             primary_index = table_info["primary_index"]
-
-            if hasattr(primary_index, 'scan_all'):
-                scan_result = primary_index.scan_all()
-                all_records = scan_result.data
-            else:
+            if not hasattr(primary_index, 'scan_all'):
                 raise NotImplementedError(f"Full scan not supported for {table_info['primary_type']} index")
 
+            scan_result = primary_index.scan_all()
+            all_records = scan_result.data
+
             matching_records = []
-            for record in all_records:
-                record_value = getattr(record, field_name, None)
-                if record_value is not None:
-                    if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
-                    else:
-                        record_value = str(record_value).rstrip()
-
-                    value_str = value.decode('utf-8').rstrip('\x00').rstrip() if hasattr(value, 'decode') else str(value).rstrip()
-
-                    if record_value == value_str:
-                        matching_records.append(record)
+            if field_type == "FLOAT":
+                # Comparación numérica con tolerancia
+                try:
+                    qv = float(value)
+                except (ValueError, TypeError):
+                    return OperationResult([], scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
+                EPS = 1e-3
+                for r in all_records:
+                    try:
+                        rv = float(getattr(r, field_name))
+                        if abs(rv - qv) <= EPS:
+                            matching_records.append(r)
+                    except Exception:
+                        continue
+            elif field_type == "INT":
+                try:
+                    qv = int(value)
+                except (ValueError, TypeError):
+                    return OperationResult([], scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
+                for r in all_records:
+                    try:
+                        rv = int(getattr(r, field_name))
+                        if rv == qv:
+                            matching_records.append(r)
+                    except Exception:
+                        continue
+            else:
+                # Fallback string exacto
+                val_str = value.decode('utf-8').rstrip('\x00').rstrip() if hasattr(value, 'decode') else str(value).rstrip()
+                for r in all_records:
+                    rv = getattr(r, field_name, None)
+                    if rv is None:
+                        continue
+                    rv_str = rv.decode('utf-8').rstrip('\x00').rstrip() if hasattr(rv, 'decode') else str(rv).rstrip()
+                    if rv_str == val_str:
+                        matching_records.append(r)
 
             return OperationResult(matching_records, scan_result.execution_time_ms, scan_result.disk_reads, scan_result.disk_writes)
 
@@ -245,9 +331,8 @@ class DatabaseManager:
             raise ValueError(f"Table {table_name} does not exist")
 
         table_info = self.tables[table_name]
-        table = table_info["table"]
 
-        if field_name is None or field_name == table.key_field:
+        if field_name is None:
             primary_index = table_info["primary_index"]
             return primary_index.range_search(start_key, end_key)
 
@@ -393,6 +478,10 @@ class DatabaseManager:
             for fname, index_info in table_info["secondary_indexes"].items():
                 secondary_index = index_info["index"]
                 secondary_value = getattr(record, fname)
+                # normalizar
+                ftype, fsize = self._get_field_info(table_info["table"], fname)
+                secondary_value = self._normalize_for_field(ftype, fsize, secondary_value)
+
                 sec_result = secondary_index.delete(secondary_value, primary_key)
 
                 breakdown[f"secondary_metrics_{fname}"]["reads"] += sec_result.disk_reads
@@ -417,64 +506,97 @@ class DatabaseManager:
 
         elif field_name in table_info["secondary_indexes"]:
             primary_index = table_info["primary_index"]
-            secondary_index = table_info["secondary_indexes"][field_name]["index"]
+            sec_info = table_info["secondary_indexes"][field_name]
+            secondary_index = sec_info["index"]
 
-            del_result = secondary_index.delete(value)
-            deleted_pks = del_result.data if isinstance(del_result.data, list) else []
+            # 1) Buscar todos los PKs para esa clave en el secundario (agnóstico al tipo de índice)
+            sec_search = secondary_index.search(value)
+            deleted_pks = sec_search.data if isinstance(sec_search.data, list) else []
 
+            # Métricas iniciales / breakdown
             breakdown = {}
             for fname in table_info["secondary_indexes"].keys():
                 breakdown[f"secondary_metrics_{fname}"] = {"reads": 0, "writes": 0, "time_ms": 0}
             breakdown["primary_metrics"] = {"reads": 0, "writes": 0, "time_ms": 0}
 
-            breakdown[f"secondary_metrics_{field_name}"]["reads"] = del_result.disk_reads
-            breakdown[f"secondary_metrics_{field_name}"]["writes"] = del_result.disk_writes
-            breakdown[f"secondary_metrics_{field_name}"]["time_ms"] = del_result.execution_time_ms
+            # Registrar las métricas de la búsqueda secundaria
+            breakdown[f"secondary_metrics_{field_name}"]["reads"] += getattr(sec_search, "disk_reads", 0)
+            breakdown[f"secondary_metrics_{field_name}"]["writes"] += getattr(sec_search, "disk_writes", 0)
+            breakdown[f"secondary_metrics_{field_name}"]["time_ms"] += getattr(sec_search, "execution_time_ms", 0)
 
             if not deleted_pks:
-                return OperationResult(0, del_result.execution_time_ms, del_result.disk_reads, del_result.disk_writes, operation_breakdown=breakdown)
+                # Nada que borrar
+                total_reads = getattr(sec_search, "disk_reads", 0)
+                total_writes = getattr(sec_search, "disk_writes", 0)
+                total_time = getattr(sec_search, "execution_time_ms", 0)
+                return OperationResult(0, total_time, total_reads, total_writes, operation_breakdown=breakdown)
 
             deleted_count = 0
-            total_reads = del_result.disk_reads
-            total_writes = del_result.disk_writes
-            total_time = del_result.execution_time_ms
+            total_reads  = getattr(sec_search, "disk_reads", 0)
+            total_writes = getattr(sec_search, "disk_writes", 0)
+            total_time   = getattr(sec_search, "execution_time_ms", 0)
 
+            # 2) Por cada PK, borrar (valor, pk) del secundario y luego del primario
             for pk in deleted_pks:
+                # 2a) Traer el registro para conocer los otros secundarios
                 search_result = primary_index.search(pk)
-                breakdown["primary_metrics"]["reads"] += search_result.disk_reads
+                breakdown["primary_metrics"]["reads"]  += search_result.disk_reads
                 breakdown["primary_metrics"]["writes"] += search_result.disk_writes
-                breakdown["primary_metrics"]["time_ms"] += search_result.execution_time_ms
-                total_reads += search_result.disk_reads
+                breakdown["primary_metrics"]["time_ms"]+= search_result.execution_time_ms
+                total_reads  += search_result.disk_reads
                 total_writes += search_result.disk_writes
-                total_time += search_result.execution_time_ms
+                total_time   += search_result.execution_time_ms
 
-                if search_result.data:
-                    record = search_result.data
+                if not search_result.data:
+                    # El primario no lo tiene; intenta limpiar al menos el par (value, pk) en el índice actual
+                    del_res = secondary_index.delete(value, pk)
+                    breakdown[f"secondary_metrics_{field_name}"]["reads"]  += del_res.disk_reads
+                    breakdown[f"secondary_metrics_{field_name}"]["writes"] += del_res.disk_writes
+                    breakdown[f"secondary_metrics_{field_name}"]["time_ms"]+= del_res.execution_time_ms
+                    total_reads  += del_res.disk_reads
+                    total_writes += del_res.disk_writes
+                    total_time   += del_res.execution_time_ms
+                    continue
 
-                    for fname, index_info in table_info["secondary_indexes"].items():
-                        if fname != field_name:
-                            sec_index = index_info["index"]
-                            sec_value = getattr(record, fname)
-                            sec_result = sec_index.delete(sec_value, pk)
-                            breakdown[f"secondary_metrics_{fname}"]["reads"] += sec_result.disk_reads
-                            breakdown[f"secondary_metrics_{fname}"]["writes"] += sec_result.disk_writes
-                            breakdown[f"secondary_metrics_{fname}"]["time_ms"] += sec_result.execution_time_ms
-                            total_reads += sec_result.disk_reads
-                            total_writes += sec_result.disk_writes
-                            total_time += sec_result.execution_time_ms
+                record = search_result.data
 
-                    prim_del = primary_index.delete(pk)
-                    breakdown["primary_metrics"]["reads"] += prim_del.disk_reads
-                    breakdown["primary_metrics"]["writes"] += prim_del.disk_writes
-                    breakdown["primary_metrics"]["time_ms"] += prim_del.execution_time_ms
-                    total_reads += prim_del.disk_reads
-                    total_writes += prim_del.disk_writes
-                    total_time += prim_del.execution_time_ms
+                # 2b) Borrar del índice secundario de la condición (value, pk)
+                del_res = secondary_index.delete(value, pk)
+                breakdown[f"secondary_metrics_{field_name}"]["reads"]  += del_res.disk_reads
+                breakdown[f"secondary_metrics_{field_name}"]["writes"] += del_res.disk_writes
+                breakdown[f"secondary_metrics_{field_name}"]["time_ms"]+= del_res.execution_time_ms
+                total_reads  += del_res.disk_reads
+                total_writes += del_res.disk_writes
+                total_time   += del_res.execution_time_ms
 
-                    if prim_del.data:
-                        deleted_count += 1
+                # 2c) Borrar del resto de secundarios (si existen)
+                for fname, idx_info in table_info["secondary_indexes"].items():
+                    if fname == field_name:
+                        continue
+                    sec_idx = idx_info["index"]
+                    sec_val = getattr(record, fname)
+                    sec_del = sec_idx.delete(sec_val, pk)
+                    breakdown[f"secondary_metrics_{fname}"]["reads"]  += sec_del.disk_reads
+                    breakdown[f"secondary_metrics_{fname}"]["writes"] += sec_del.disk_writes
+                    breakdown[f"secondary_metrics_{fname}"]["time_ms"]+= sec_del.execution_time_ms
+                    total_reads  += sec_del.disk_reads
+                    total_writes += sec_del.disk_writes
+                    total_time   += sec_del.execution_time_ms
+
+                # 2d) Borrar en el primario
+                prim_del = primary_index.delete(pk)
+                breakdown["primary_metrics"]["reads"]  += prim_del.disk_reads
+                breakdown["primary_metrics"]["writes"] += prim_del.disk_writes
+                breakdown["primary_metrics"]["time_ms"]+= prim_del.execution_time_ms
+                total_reads  += prim_del.disk_reads
+                total_writes += prim_del.disk_writes
+                total_time   += prim_del.execution_time_ms
+
+                if prim_del.data:
+                    deleted_count += 1
 
             return OperationResult(deleted_count, total_time, total_reads, total_writes, operation_breakdown=breakdown)
+
 
         else:
             table = table_info["table"]
@@ -488,19 +610,27 @@ class DatabaseManager:
             all_records = scan_result.data
 
             matching_records = []
-            field_type, _ = field_info
+            field_type, field_size = field_info
 
+            # comparar por igualdad (string) en full scan
+            val_str = value.decode('utf-8').rstrip('\x00').rstrip() if hasattr(value, 'decode') else str(value).rstrip()
             for record in all_records:
-                record_value = getattr(record, field_name, None)
-                if record_value is not None:
-                    if hasattr(record_value, 'decode'):
-                        record_value = record_value.decode('utf-8').rstrip('\x00').rstrip()
-                    else:
-                        record_value = str(record_value).rstrip()
-
-                    value_str = value.decode('utf-8').rstrip('\x00').rstrip() if hasattr(value, 'decode') else str(value).rstrip()
-
-                    if record_value == value_str:
+                raw = getattr(record, field_name, None)
+                raw_norm = self._normalize_for_field(field_type, field_size, raw)
+                if isinstance(raw_norm, float):
+                    try:
+                        if abs(raw_norm - float(val_str)) <= 1e-3:
+                            matching_records.append(record)
+                    except Exception:
+                        pass
+                elif isinstance(raw_norm, int):
+                    try:
+                        if raw_norm == int(val_str):
+                            matching_records.append(record)
+                    except Exception:
+                        pass
+                else:
+                    if str(raw_norm) == val_str:
                         matching_records.append(record)
 
             if not matching_records:
@@ -525,6 +655,9 @@ class DatabaseManager:
                 for fname, index_info in table_info["secondary_indexes"].items():
                     sec_index = index_info["index"]
                     sec_value = getattr(record, fname)
+                    ft, fs = self._get_field_info(table_info["table"], fname)
+                    sec_value = self._normalize_for_field(ft, fs, sec_value)
+
                     sec_result = sec_index.delete(sec_value, pk)
                     secondary_delete_metrics[fname]["reads"] += sec_result.disk_reads
                     secondary_delete_metrics[fname]["writes"] += sec_result.disk_writes
@@ -588,6 +721,9 @@ class DatabaseManager:
             for fname, index_info in table_info["secondary_indexes"].items():
                 sec_index = index_info["index"]
                 sec_value = getattr(record, fname)
+                ft, fs = self._get_field_info(table_info["table"], fname)
+                sec_value = self._normalize_for_field(ft, fs, sec_value)
+
                 sec_result = sec_index.delete(sec_value, primary_key)
                 secondary_delete_metrics[fname]["reads"] += sec_result.disk_reads
                 secondary_delete_metrics[fname]["writes"] += sec_result.disk_writes
@@ -745,17 +881,33 @@ class DatabaseManager:
                 return (ftype, fsize)
         return None
 
+    def _normalize_for_field(self, field_type: str, field_size: int, value):
+        """Normaliza un valor para usarlo como clave de índice secundario."""
+        if value is None:
+            return None
+        if field_type == "CHAR":
+            if isinstance(value, (bytes, bytearray)):
+                value = bytes(value).decode("utf-8", "ignore")
+            return str(value).rstrip("\x00").strip()
+        if field_type == "INT":
+            if isinstance(value, (bytes, bytearray)):
+                value = bytes(value).decode("utf-8", "ignore").strip()
+            return int(value)
+        if field_type == "FLOAT":
+            if isinstance(value, (bytes, bytearray)):
+                value = bytes(value).decode("utf-8", "ignore").strip()
+            return float(value)
+        # ARRAY/otros tipos: devolver tal cual
+        return value
+
     def _create_primary_index(self, table: Table, index_type: str, csv_filename: str):
         if index_type == "ISAM":
-
             primary_dir = os.path.join(self.base_dir, table.table_name, f"primary_isam_{table.key_field}")
             os.makedirs(primary_dir, exist_ok=True)
             primary_filename = os.path.join(primary_dir, "datos.dat")
-
             return ISAMPrimaryIndex(table, primary_filename)
 
         elif index_type == "SEQUENTIAL":
-
             primary_dir = os.path.join(self.base_dir, table.table_name, f"primary_sequential_{table.key_field}")
             os.makedirs(primary_dir, exist_ok=True)
             main_filename = os.path.join(primary_dir, "main.dat")
@@ -775,12 +927,11 @@ class DatabaseManager:
             os.makedirs(primary_dir, exist_ok=True)
             primary_filename = os.path.join(primary_dir, "btree_clustered")
             return BPlusTreeClusteredIndex(
-                order=50,
+                order=128,
                 key_column=table.key_field,
                 file_path=primary_filename,
                 record_class=Record
             )
-
 
         raise NotImplementedError(f"Primary index type {index_type} not implemented yet")
 
@@ -794,18 +945,16 @@ class DatabaseManager:
             filename = os.path.join(secondary_dir, "btree_unclustered")
 
             return BPlusTreeUnclusteredIndex(
-                order=4,
+                order=128,
                 index_column=field_name,
                 file_path=filename
             )
         elif index_type == "HASH":
-
             secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_hash_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
-
             data_filename = os.path.join(secondary_dir, "datos")
-
             return ExtendibleHashing(data_filename, field_name, field_type, field_size, is_primary=False)
+
         elif index_type == "RTREE":
             secondary_dir = os.path.join(self.base_dir, "secondary")
             os.makedirs(secondary_dir, exist_ok=True)
@@ -868,5 +1017,4 @@ class DatabaseManager:
 
         table_info = self.tables[table_name]
         primary_index = table_info["primary_index"]
-
         return primary_index.scan_all()

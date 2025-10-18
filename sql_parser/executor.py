@@ -8,6 +8,7 @@ from .plan_types import (
 from indexes.core.record import Table, Record
 from indexes.core.performance_tracker import OperationResult
 from indexes.core.database_manager import DatabaseManager
+from indexes.core.record import IndexRecord
 
 
 class Executor:
@@ -67,7 +68,7 @@ class Executor:
         pk_name = pk_col.name
         idx_decl = (pk_col.index or "ISAM").upper()
         allowed_primary = {"ISAM", "SEQUENTIAL", "BTREE"}
-        primary_index_type = idx_decl if idx_decl in allowed_primary else "BTREE"
+        primary_index_type = idx_decl if idx_decl in allowed_primary else "ISAM"
         return pk_name, primary_index_type
 
     # ====== CREATE TABLE ======
@@ -105,11 +106,12 @@ class Executor:
         for colname, idx_kind in secondary_decls:
             try:
                 if self.db._validate_secondary_index(idx_kind):
+                    # se crean (vacíos) aquí; durante LOAD los desactivaremos temporalmente
                     self.db.create_index(plan.table, colname, idx_kind, scan_existing=False)
                     created_any = True
                 else:
                     unsupported.append(f"{colname}:{idx_kind}")
-            except NotImplementedError as e:
+            except NotImplementedError:
                 unsupported.append(f"{colname}:{idx_kind}(NotImpl)")
             except Exception as e:
                 unsupported.append(f"{colname}:{idx_kind}({str(e)[:30]})")
@@ -118,11 +120,11 @@ class Executor:
         if ignored_cols:
             msg_parts.append(f"— Columnas no soportadas (ignoradas): {', '.join(ignored_cols)}")
         if unsupported or (secondary_decls and not created_any):
-            if not unsupported:  # declarados pero ninguno pudo crearse
+            if not unsupported:
                 unsupported = [f"{c}:{k}" for c, k in secondary_decls]
             msg_parts.append(f"— Índices secundarios no soportados: {', '.join(unsupported)}")
         result_msg = " ".join(msg_parts)
-        return OperationResult(result_msg, 0, 0, 0)  # CREATE TABLE doesn't involve significant disk I/O in our model
+        return OperationResult(result_msg, 0, 0, 0)
 
     # ====== helpers CSV ======
     def _defaults_for_field(self, ftype: str) -> Any:
@@ -135,7 +137,7 @@ class Executor:
         if ftype == "BOOL":
             return False
         if ftype == "ARRAY":
-            return (0.0, 0.0) 
+            return (0.0, 0.0)
         return None
 
     def _cast_value(self, raw: str, ftype: str):
@@ -155,50 +157,32 @@ class Executor:
         return raw
 
     def _cast_date_ddmmyyyy_to_iso(self, s: str) -> str:
-        # convierte "24/10/2024" -> "2024-10-24"; si ya está en "YYYY-MM-DD" lo deja
         s = (s or "").strip()
         if not s:
             return ""
         if "-" in s and len(s) == 10:
-            # asume YYYY-MM-DD
             return s
-        # soportar DD/MM/YYYY (con o sin cero a la izquierda)
         parts = s.split("/")
         if len(parts) == 3:
             dd, mm, yyyy = parts
             dd = dd.zfill(2)
             mm = mm.zfill(2)
             return f"{yyyy}-{mm}-{dd}"
-        return s  # fallback sin romper
+        return s
 
     def _guess_delimiter(self, header_line: str) -> str:
-        # simple heurística ; o ,  (prioriza ';' si aparece)
         return ";" if header_line.count(";") >= header_line.count(",") else ","
 
     def _spanish_header_mapping(self, headers: List[str]) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
         for h in headers:
             hl = (h or "").strip().lower()
-            # id
             if ("id" in hl) and ("venta" in hl or "id" == hl or hl.startswith("id ")):
-                mapping[hl] = "id"
-                continue
-            # nombre
-            if "nombre" in hl:
-                mapping[hl] = "nombre"
-                continue
-            # cantidad
-            if "cantidad" in hl:
-                mapping[hl] = "cantidad"
-                continue
-            # precio
-            if "precio" in hl:
-                mapping[hl] = "precio"
-                continue
-            # fecha
-            if "fecha" in hl:
-                mapping[hl] = "fecha"
-                continue
+                mapping[hl] = "id"; continue
+            if "nombre" in hl:   mapping[hl] = "nombre";   continue
+            if "cantidad" in hl: mapping[hl] = "cantidad"; continue
+            if "precio" in hl:   mapping[hl] = "precio";   continue
+            if "fecha" in hl:    mapping[hl] = "fecha";    continue
         return mapping
 
     # ====== LOAD DATA FROM FILE ======
@@ -212,95 +196,214 @@ class Executor:
         key_field = table_obj.key_field
 
         inserted = duplicates = cast_err = 0
-        total_reads = total_writes = 0
-        total_time_ms = 0.0
 
-        with open(plan.filepath, "r", encoding="utf-8", newline="") as fh_probe:
-            first_line = fh_probe.readline()
-            delimiter = self._guess_delimiter(first_line)
+        # ===== depuración =====
+        PROGRESS_EVERY = 100
+        MAX_ROWS = None
+        import time
+        t0 = time.perf_counter()
+        last_t = t0
+        none_key_rows = 0
 
-        with open(plan.filepath, "r", encoding="utf-8", newline="") as f:
-            reader = csv.reader(f, delimiter=delimiter)
-            header = next(reader, None)
-            if not header:
-                return OperationResult("CSV vacío: insertados=0", 0, 0, 0)
+        # === detectar delimitador
+        try:
+            with open(plan.filepath, "r", encoding="utf-8-sig", newline="") as fprobe:
+                sample = fprobe.read(4096)
+                import csv as _csv
+                try:
+                    delimiter = _csv.Sniffer().sniff(sample, delimiters=",;|\t").delimiter
+                except Exception:
+                    first_line = sample.splitlines()[0] if sample else ""
+                    delimiter = ";" if first_line.count(";") >= first_line.count(",") else ","
+        except UnicodeDecodeError:
+            with open(plan.filepath, "r", encoding="latin-1", newline="") as fprobe:
+                sample = fprobe.read(4096)
+                import csv as _csv
+                try:
+                    delimiter = _csv.Sniffer().sniff(sample, delimiters=",;|\t").delimiter
+                except Exception:
+                    first_line = sample.splitlines()[0] if sample else ""
+                    delimiter = ";" if first_line.count(";") >= first_line.count(",") else ","
 
-            # Excluir campos internos (active, etc) que no vienen del CSV
-            user_fields = [(name, ftype, fsize) for (name, ftype, fsize) in phys_fields
-                          if name not in ['active']]
+        def _norm(s: str) -> str:
+            return (s or "").replace("\ufeff", "").strip().lower()
 
-            for row_values in reader:
-                rec = Record(phys_fields, key_field)
-                ok_row = True
+        # === Desactivar secundarios mientras inserto
+        tbl_info = self.db.tables[plan.table]
+        saved_secondaries = tbl_info["secondary_indexes"]
+        tbl_info["secondary_indexes"] = {}
 
-                for field_name, field_type, field_size in user_fields:
-                    try:
-                        if field_type == "ARRAY" and plan.column_mappings and field_name in plan.column_mappings:
-                            csv_column_names = plan.column_mappings[field_name]
-                            array_values = []
-                            
-                            for csv_col in csv_column_names:
-                                try:
-                                    csv_idx = header.index(csv_col)
-                                    if csv_idx < len(row_values):
-                                        val = self._cast_value(row_values[csv_idx], "FLOAT")
-                                        array_values.append(val)
+        # === Inserción rápida (solo primario)
+        try:
+            try:
+                f = open(plan.filepath, "r", encoding="utf-8-sig", newline="")
+            except UnicodeDecodeError:
+                f = open(plan.filepath, "r", encoding="latin-1", newline="")
+
+            with f:
+                reader = csv.reader(f, delimiter=delimiter)
+                header = next(reader, None)
+                if not header:
+                    tbl_info["secondary_indexes"] = saved_secondaries
+                    return OperationResult("CSV vacío: insertados=0", 0, 0, 0)
+
+                header_norm = [_norm(h) for h in header]
+                header_idx = {h: i for i, h in enumerate(header_norm)}
+
+                syn_map = self._spanish_header_mapping(header)
+                syn_map_norm = {_norm(k): v for k, v in syn_map.items()}
+
+                user_map: Dict[str, Any] = {}
+                if getattr(plan, "column_mappings", None):
+                    for logical_col, csv_name_or_list in plan.column_mappings.items():
+                        if isinstance(csv_name_or_list, list):
+                            user_map[logical_col] = [_norm(x) for x in csv_name_or_list]
+                        else:
+                            user_map[logical_col] = _norm(csv_name_or_list)
+
+                def _csv_index_for(logical_name: str) -> Optional[int]:
+                    ln = _norm(logical_name)
+                    if logical_name in user_map and isinstance(user_map[logical_name], str):
+                        return header_idx.get(user_map[logical_name], None)
+                    if ln in header_idx:
+                        return header_idx[ln]
+                    for h_norm, i in header_idx.items():
+                        target = syn_map_norm.get(h_norm)
+                        if target and _norm(target) == ln:
+                            return i
+                    compact = ln.replace(" ", "")
+                    for h_norm, i in header_idx.items():
+                        if h_norm.replace(" ", "") == compact:
+                            return i
+                    return None
+
+                user_fields = [(name, ftype, fsize) for (name, ftype, fsize) in phys_fields if name not in ['active']]
+
+                for row_idx, row_values in enumerate(reader, 1):
+                    rec = Record(phys_fields, key_field)
+                    ok_row = True
+
+                    for field_name, field_type, field_size in user_fields:
+                        try:
+                            if field_type == "ARRAY" and field_name in user_map and isinstance(user_map[field_name], list):
+                                csv_column_names_norm = user_map[field_name]
+                                array_values: List[float] = []
+                                for csv_norm in csv_column_names_norm:
+                                    idx = header_idx.get(csv_norm)
+                                    if idx is not None and idx < len(row_values):
+                                        val = self._cast_value(row_values[idx], "FLOAT")
+                                        array_values.append(val if val is not None else 0.0)
                                     else:
                                         array_values.append(0.0)
-                                except (ValueError, IndexError):
+                                while len(array_values) < field_size:
                                     array_values.append(0.0)
-                            
-                            while len(array_values) < field_size:
-                                array_values.append(0.0)
-                            array_values = array_values[:field_size]
-                            
-                            rec.set_field_value(field_name, tuple(array_values))
-                            
-                        elif field_type != "ARRAY":
-                            try:
-                                csv_idx = header.index(field_name)
-                                if csv_idx < len(row_values):
-                                    raw = row_values[csv_idx]
-                                else:
-                                    raw = None
-                            except ValueError:
-                                raw = None
+                                array_values = array_values[:field_size]
+                                rec.set_field_value(field_name, tuple(array_values))
+                                continue
+
+                            csv_idx = _csv_index_for(field_name)
+                            raw = row_values[csv_idx] if (csv_idx is not None and csv_idx < len(row_values)) else None
 
                             if field_type == "CHAR" and field_name == "fecha":
                                 raw = self._cast_date_ddmmyyyy_to_iso(str(raw) if raw is not None else "")
 
                             val = self._cast_value(raw, field_type)
+
+                            if field_type == "ARRAY":
+                                if isinstance(val, (list, tuple)):
+                                    val = tuple(val)
+                                else:
+                                    val = tuple([0.0] * field_size)
+
                             rec.set_field_value(field_name, val)
+                        except Exception:
+                            ok_row = False
+                            break
+
+                    if 'active' in [name for (name, _, _) in phys_fields]:
+                        rec.set_field_value('active', True)
+
+                    if not ok_row:
+                        cast_err += 1
+                        continue
+
+                    key_val = getattr(rec, key_field, None)
+                    if key_val is None:
+                        none_key_rows += 1
+
+                    try:
+                        res = self.db.insert(plan.table, rec)
+                        if hasattr(res, "data") and (res.data is False):
+                            duplicates += 1
                         else:
-                            rec.set_field_value(field_name, tuple([0.0] * field_size))
-                            
-                    except Exception as e:
-                        ok_row = False
+                            inserted += 1
+                    except Exception:
+                        cast_err += 1
+                        continue
+
+                    if (row_idx % PROGRESS_EVERY) == 0:
+                        now = time.perf_counter()
+                        dt = now - last_t
+                        rate = PROGRESS_EVERY / dt if dt > 0 else float("inf")
+                        total_dt = now - t0
+                        print(f"[LOAD] {row_idx} filas, +{PROGRESS_EVERY} en {dt:.2f}s (~{rate:.1f} filas/s), total {total_dt:.2f}s; "
+                              f"ins={inserted}, dup={duplicates}, err={cast_err}, none_key={none_key_rows}")
+                        last_t = now
+
+                    if MAX_ROWS is not None and row_idx >= MAX_ROWS:
                         break
+        finally:
+            # === Reconstrucción de índices secundarios con UN SOLO SCAN y progreso
+            import time as _t
+            print("[BUILD] Escaneando primario una vez para poblar índices secundarios…")
+            scan_res = self.db.scan_all(plan.table)
+            all_recs = scan_res.data or []
+            print(f"[BUILD] Total registros a indexar: {len(all_recs)}")
 
-                if 'active' in [name for (name, _, _) in phys_fields]:
-                    rec.set_field_value('active', True)
+            # Limpia secundarios y vuelve a crearlos vacíos, pero insertando en ORDEN por la clave secundaria
+            tbl_info["secondary_indexes"] = {}
+            for field_name, idx_info in saved_secondaries.items():
+                idx_type = idx_info["type"]
+                print(f"[BUILD] Creando índice {idx_type} sobre {field_name}…")
+                self.db.create_index(plan.table, field_name, idx_type, scan_existing=False)
 
-                if not ok_row:
-                    cast_err += 1
-                    continue
+                sec = self.db.tables[plan.table]["secondary_indexes"][field_name]["index"]
+                ftype, fsize = self._get_field_info_full(plan.table, field_name)
 
-                try:
-                    res = self.db.insert(plan.table, rec)
-                    total_reads += res.disk_reads
-                    total_writes += res.disk_writes
-                    total_time_ms += res.execution_time_ms
+                # --- clave de ordenación estable (convierte bytes a str si es necesario)
+                def _sec_key(r):
+                    v = getattr(r, field_name)
+                    if isinstance(v, (bytes, bytearray)):
+                        v = bytes(v).decode("utf-8", "ignore").rstrip("\x00").strip()
+                    return v
 
-                    if hasattr(res, "data") and (res.data is False):
-                        duplicates += 1
-                    else:
-                        inserted += 1
-                except Exception as e:
-                    cast_err += 1
-                    continue
+                # Ordena por la clave secundaria para minimizar splits/I/O
+                pairs = [(_sec_key(r), r.get_key()) for r in all_recs]
+                pairs.sort(key=lambda x: x[0])
 
-        summary = f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}"
-        return OperationResult(summary, total_time_ms, total_reads, total_writes)
+                t0_build = _t.perf_counter()
+                PROG = 1000
+                for i, (sec_val, pk) in enumerate(pairs, 1):
+                    idx_rec = IndexRecord(ftype, fsize)
+                    idx_rec.set_index_data(sec_val, pk)
+                    sec.insert(idx_rec)
+                    if (i % PROG) == 0:
+                        dt = _t.perf_counter() - t0_build
+                        print(f"[BUILD] {field_name}: {i}/{len(pairs)} en {dt:.2f}s (~{i/max(dt,1e-9):.1f} ins/s)")
+                dt_total = _t.perf_counter() - t0_build
+                print(f"[BUILD] {field_name}: listo en {dt_total:.2f}s (reg/s ≈ {len(pairs)/max(dt_total,1e-9):.1f})")
+
+
+        total_ms = (time.perf_counter() - t0) * 1000.0
+        msg = f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}, none_key={none_key_rows}"
+        return OperationResult(msg, total_ms, 0, 0)
+
+    def _get_field_info_full(self, table_name: str, field_name: str):
+        tinfo = self.db.tables[table_name]["table"]
+        for fname, ftype, fsize in tinfo.all_fields:
+            if fname == field_name:
+                return ftype, fsize
+        raise ValueError(f"Field {field_name} not found in table {table_name}")
 
     # ====== SELECT ======
     def _get_ftype(self, table: str, col: str) -> Optional[str]:
@@ -315,6 +418,20 @@ class Executor:
     def _project_records(self, records: List[Record], columns: Optional[List[str]]) -> List[Dict[str, Any]]:
         if not records:
             return []
+
+        def _fmt(v):
+            # --- NUEVO: formateo amable para floats y colecciones de floats (solo presentación)
+            if isinstance(v, float):
+                return round(v, 2)
+            if isinstance(v, (list, tuple)):
+                return type(v)(round(x, 2) if isinstance(x, float) else x for x in v)
+            if isinstance(v, bytes):
+                try:
+                    return v.decode("utf-8").rstrip("\x00").strip()
+                except UnicodeDecodeError:
+                    return v.decode("utf-8", errors="replace").rstrip("\x00").strip()
+            return v
+
         out = []
         names = [n for (n, _, _) in records[0].value_type_size]
         pick = names if (columns is None) else columns
@@ -322,12 +439,7 @@ class Executor:
             obj = {}
             for c in pick:
                 val = getattr(r, c, None)
-                if isinstance(val, bytes):
-                    try:
-                        val = val.decode("utf-8").rstrip("\x00").strip()
-                    except UnicodeDecodeError:
-                        val = val.decode("utf-8", errors="replace").rstrip("\x00").strip()
-                obj[c] = val
+                obj[c] = _fmt(val)
             out.append(obj)
         return out
 
@@ -359,14 +471,12 @@ class Executor:
 
         if isinstance(where, (PredicateInPointRadius, PredicateKNN)):
             col = where.column
-            
+
             if isinstance(where, PredicateInPointRadius):
-                # point, radius
                 res = self.db.range_search(plan.table, list(where.point), where.radius, field_name=col, spatial_type="radius")
-            else:  # PredicateKNN
-                # point, k
+            else:
                 res = self.db.range_search(plan.table, list(where.point), where.k, field_name=col, spatial_type="knn")
-                
+
             projected_data = self._project_records(res.data, plan.columns)
             return OperationResult(projected_data, res.execution_time_ms, res.disk_reads, res.disk_writes, res.rebuild_triggered, res.operation_breakdown)
 

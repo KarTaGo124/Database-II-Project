@@ -35,7 +35,6 @@ class InternalNode(Node):
 
 
 class PrimaryKeyPointer:
-   
     def __init__(self, primary_key: Any):
         self.primary_key = primary_key
 
@@ -62,7 +61,10 @@ class BPlusTreeUnclusteredIndex:
         self.min_keys = (order + 1) // 2 - 1
         self.key_field = index_column
         self.file_path = file_path + ".dat"
-        self.page_size = 4096
+        self.page_size = 8192
+
+        # --- NORMALIZACIÓN DE CLAVES: evita bytes vs str ---
+        self._norm = lambda k: (k.decode("utf-8", "ignore") if isinstance(k, (bytes, bytearray)) else k)
 
         self.performance = PerformanceTracker()
 
@@ -150,6 +152,11 @@ class BPlusTreeUnclusteredIndex:
 
                 node = pickle.loads(page_data.rstrip(b'\x00'))
                 node.page_id = page_id
+
+                # --- normaliza claves al cargar ---
+                if isinstance(node.keys, list):
+                    node.keys = [self._norm(k) for k in node.keys]
+
                 return node
         except (EOFError, pickle.UnpicklingError, OSError):
             return None
@@ -166,6 +173,11 @@ class BPlusTreeUnclusteredIndex:
             os.makedirs(dir_path, exist_ok=True)
 
         node.page_id = page_id
+
+        # --- normaliza claves antes de serializar ---
+        if isinstance(node.keys, list):
+            node.keys = [self._norm(k) for k in node.keys]
+
         serialized = pickle.dumps(node)
 
         if len(serialized) > self.page_size:
@@ -201,28 +213,25 @@ class BPlusTreeUnclusteredIndex:
         return page_id
 
     def search(self, key: Any) -> OperationResult:
-       
         self.performance.start_operation()
         
+        key = self._norm(key)
         self._read_metadata()
         leaf_node = self._find_leaf_node(key)
         pos = bisect.bisect_left(leaf_node.keys, key)
         
         primary_keys = []
         while pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
-            # Extract the primary_key value from PrimaryKeyPointer
             primary_keys.append(leaf_node.values[pos].primary_key)
             pos += 1
 
         return self.performance.end_operation(primary_keys)
 
     def insert(self, index_record : IndexRecord) -> OperationResult:
-
         self.performance.start_operation()
 
-        secondary_key = index_record.index_value
+        secondary_key = self._norm(index_record.index_value)
         primary_key = index_record.primary_key
-
         primary_key_pointer = PrimaryKeyPointer(primary_key)
 
         self._read_metadata()
@@ -232,6 +241,7 @@ class BPlusTreeUnclusteredIndex:
         return self.performance.end_operation(True)
 
     def _insert_recursive(self, node: Node, key: Any, primary_key_pointer: PrimaryKeyPointer):
+        key = self._norm(key)
         if isinstance(node, LeafNode):
             pos = bisect.bisect_left(node.keys, key)
             node.keys.insert(pos, key)
@@ -250,6 +260,7 @@ class BPlusTreeUnclusteredIndex:
     def delete(self, secondary_key: Any, primary_key: Any = None) -> OperationResult:
         self.performance.start_operation()
 
+        secondary_key = self._norm(secondary_key)
         if primary_key is not None:
             result = self._delete_by_keys(secondary_key, primary_key)
             return self.performance.end_operation(result)
@@ -318,9 +329,11 @@ class BPlusTreeUnclusteredIndex:
         return deleted_pks
 
     def range_search(self, start_key: Any, end_key: Any) -> OperationResult:
-       
         self.performance.start_operation()
         
+        start_key = self._norm(start_key)
+        end_key = self._norm(end_key)
+
         results = []
         self._read_metadata()
         leaf = self._find_leaf_node(start_key)
@@ -332,7 +345,6 @@ class BPlusTreeUnclusteredIndex:
                 if leaf.keys[i] > end_key:
                     return self.performance.end_operation(results)
                 if leaf.keys[i] >= start_key:
-                    # Extract the primary_key value from PrimaryKeyPointer
                     results.append(leaf.values[i].primary_key)
             
             if leaf.next_id is not None:
@@ -344,6 +356,7 @@ class BPlusTreeUnclusteredIndex:
         return self.performance.end_operation(results)
 
     def _find_leaf_node(self, key: Any) -> LeafNode:
+        key = self._norm(key)
         current = self._read_page(self.root_page_id)
         while isinstance(current, InternalNode):
             pos = bisect.bisect_right(current.keys, key)
@@ -358,7 +371,7 @@ class BPlusTreeUnclusteredIndex:
         new_page_id = self._allocate_page_id()
         new_leaf.page_id = new_page_id
         
-        new_leaf.keys = leaf.keys[mid:]
+        new_leaf.keys = [self._norm(k) for k in leaf.keys[mid:]]
         new_leaf.values = leaf.values[mid:]
         new_leaf.parent_id = leaf.parent_id
         
@@ -372,7 +385,7 @@ class BPlusTreeUnclusteredIndex:
         
         leaf.next_id = new_leaf.page_id
         
-        leaf.keys = leaf.keys[:mid]
+        leaf.keys = [self._norm(k) for k in leaf.keys[:mid]]
         leaf.values = leaf.values[:mid]
         
         self._write_page(new_leaf.page_id, new_leaf)
@@ -383,13 +396,13 @@ class BPlusTreeUnclusteredIndex:
 
     def _split_internal(self, internal: InternalNode):
         mid = len(internal.keys) // 2
-        promote_key = internal.keys[mid]
+        promote_key = self._norm(internal.keys[mid])
         
         new_internal = InternalNode()
         new_page_id = self._allocate_page_id()
         new_internal.page_id = new_page_id
         
-        new_internal.keys = internal.keys[mid + 1:]
+        new_internal.keys = [self._norm(k) for k in internal.keys[mid + 1:]]
         new_internal.children_ids = internal.children_ids[mid + 1:]
         new_internal.parent_id = internal.parent_id
         
@@ -398,7 +411,7 @@ class BPlusTreeUnclusteredIndex:
             child.parent_id = new_internal.page_id
             self._write_page(child_id, child)
         
-        internal.keys = internal.keys[:mid]
+        internal.keys = [self._norm(k) for k in internal.keys[:mid]]
         internal.children_ids = internal.children_ids[:mid + 1]
         
         self._write_page(new_internal.page_id, new_internal)
@@ -407,6 +420,7 @@ class BPlusTreeUnclusteredIndex:
         self._promote_key(internal, promote_key, new_internal)
 
     def _promote_key(self, left_child: Node, key: Any, right_child: Node):
+        key = self._norm(key)
         if left_child.parent_id is None:
             new_root = InternalNode()
             new_root_id = self._allocate_page_id()
