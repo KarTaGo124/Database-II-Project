@@ -40,7 +40,7 @@ class BPlusTreeClusteredIndex:
         self.min_keys = (order + 1) // 2 - 1
         self.file_path = file_path
         self.data_file = file_path + ".dat"
-        self.page_size = 4096
+        self.page_size = 16384
 
         self.performance = PerformanceTracker()
 
