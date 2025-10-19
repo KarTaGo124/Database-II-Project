@@ -758,6 +758,29 @@ class ISAMPrimaryIndex:
                 break
 
         return length
+    def warm_up(self):
+        
+        if not os.path.exists(self.filename):
+            return
+        
+        try:
+            with open(self.root_index_file, "rb") as root_file:
+                _ = self._read_root_index(root_file, 0)
+            
+            with open(self.leaf_index_file, "rb") as leaf_file:
+                _ = self._read_leaf_index(leaf_file, 0)
+            
+            with open(self.filename, "rb") as data_file:
+                _ = self._read_page(data_file, 0)
+            
+            dummy_key = -999999
+            _ = self._find_target_leaf_page(dummy_key)
+            _ = self._find_target_data_page(dummy_key, 0)
+            
+        except:
+            pass
+        
+        self.performance = PerformanceTracker()
 
     def _should_rebuild(self):
         if not os.path.exists(self.filename):
