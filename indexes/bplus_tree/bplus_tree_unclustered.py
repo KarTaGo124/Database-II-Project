@@ -1,21 +1,21 @@
 from typing import Any, List, Optional
 import bisect
-import pickle
+import struct
 import os
+from ..core.record import IndexRecord
 from ..core.performance_tracker import PerformanceTracker, OperationResult
-from ..core.record import IndexRecord 
 
 
 class Node:
-    def __init__(self, is_leaf: bool=False):
+    def __init__(self, is_leaf: bool = False):
         self.is_leaf = is_leaf
         self.keys = []
-        self.parent_id = None
-        self.page_id = None
-    
+        self.parent_node_id = None
+        self.node_id = None
+
     def is_full(self, max_keys: int) -> bool:
-        return len(self.keys) > max_keys
-    
+        return len(self.keys) >= max_keys
+
     def is_underflow(self, min_keys: int) -> bool:
         return len(self.keys) < min_keys
 
@@ -23,232 +23,558 @@ class Node:
 class LeafNode(Node):
     def __init__(self):
         super().__init__(is_leaf=True)
-        self.values = [] 
-        self.previous_id = None
-        self.next_id = None
+        self.index_records = []
+        self.prev_leaf_id = None
+        self.next_leaf_id = None
+
+    def pack(self, key_packer, index_record_size: int, null_id: int) -> bytes:
+        parent_id = self.parent_node_id if self.parent_node_id is not None else null_id
+        prev_id = self.prev_leaf_id if self.prev_leaf_id is not None else null_id
+        next_id = self.next_leaf_id if self.next_leaf_id is not None else null_id
+        
+        data = bytearray()
+        
+        data.extend(struct.pack('?', True))
+        data.extend(struct.pack('i', len(self.keys)))
+        data.extend(struct.pack('i', self.node_id))
+        data.extend(struct.pack('i', parent_id))
+
+        data.extend(struct.pack('i', prev_id))
+        data.extend(struct.pack('i', next_id))
+        
+        for i in range(len(self.keys)):
+            data.extend(key_packer(self.keys[i]))
+            data.extend(self.index_records[i].pack())
+        
+        return bytes(data)
+
+    @staticmethod
+    def unpack(data: bytes, offset: int, num_keys: int, node_id: int, parent_id: Optional[int],
+               key_unpacker, key_storage_size: int, index_record_size: int, index_record_class,
+               value_type_size: List, key_column: str, null_id: int, normalize_key: bool) -> 'LeafNode':
+        leaf = LeafNode()
+        leaf.node_id = node_id
+        leaf.parent_node_id = parent_id
+
+        prev_id, next_id = struct.unpack('ii', data[offset:offset+8])
+        
+        leaf.prev_leaf_id = None if prev_id == null_id else prev_id
+        leaf.next_leaf_id = None if next_id == null_id else next_id
+        
+        offset += 8
+
+        leaf.keys = []
+        leaf.index_records = []
+
+        for i in range(num_keys):
+            key_bytes = data[offset:offset+key_storage_size]
+            
+            key = key_unpacker(key_bytes)
+            
+            if normalize_key:
+                key = key.decode('utf-8').rstrip('\x00')
+            
+            leaf.keys.append(key)
+            
+            offset += key_storage_size
+
+            index_record_bytes = data[offset:offset+index_record_size]
+            
+            index_record = index_record_class.unpack(index_record_bytes, value_type_size, key_column)
+            
+            for field_name, field_type, _ in value_type_size:
+                if field_type == "CHAR":
+                    value = getattr(index_record, field_name)
+                    if isinstance(value, bytes):
+                        setattr(index_record, field_name, value.decode('utf-8').rstrip('\x00'))
+            
+            leaf.index_records.append(index_record)
+            
+            offset += index_record_size
+
+        return leaf
 
 
 class InternalNode(Node):
     def __init__(self):
         super().__init__(is_leaf=False)
-        self.children_ids = []
+        self.child_node_ids = []
 
+    def pack(self, key_packer, null_id: int) -> bytes:
+        parent_id = self.parent_node_id if self.parent_node_id is not None else null_id
+        
+        data = bytearray()
+        
+        data.extend(struct.pack('?', False))
+        data.extend(struct.pack('i', len(self.keys)))
+        data.extend(struct.pack('i', self.node_id))
+        data.extend(struct.pack('i', parent_id))
+        
+        for key in self.keys:
+            data.extend(key_packer(key))
+        
+        for child_id in self.child_node_ids:
+            data.extend(struct.pack('i', child_id))
+        
+        return bytes(data)
 
-class PrimaryKeyPointer:
-   
-    def __init__(self, primary_key: Any):
-        self.primary_key = primary_key
+    @staticmethod
+    def unpack(data: bytes, offset: int, num_keys: int, node_id: int, parent_id: Optional[int],
+               key_unpacker, key_storage_size: int, normalize_key: bool) -> 'InternalNode':
+        internal = InternalNode()
+        internal.node_id = node_id
+        internal.parent_node_id = parent_id
 
-    def __str__(self):
-        return f"PK({self.primary_key})"
+        internal.keys = []
+        internal.child_node_ids = []
 
-    def __repr__(self):
-        return self.__str__()
-    
-    def __eq__(self, other):
-        return (isinstance(other, PrimaryKeyPointer) and 
-                self.primary_key == other.primary_key)
-    
-    def __hash__(self):
-        return hash(self.primary_key)
+        for i in range(num_keys):
+            key_bytes = data[offset:offset+key_storage_size]
+            
+            key = key_unpacker(key_bytes)
+            
+            if normalize_key:
+                key = key.decode('utf-8').rstrip('\x00')
+            
+            internal.keys.append(key)
+            
+            offset += key_storage_size
 
+        child_count = num_keys + 1
+        
+        children = struct.unpack(f'{child_count}i', data[offset:offset+(child_count*4)])
+        
+        internal.child_node_ids = list(children)
+
+        return internal
 
 class BPlusTreeUnclusteredIndex:
+    METADATA_NODE_ID = 0
+    FIRST_DATA_NODE_ID = 1
+    NULL_NODE_ID = -1
 
     def __init__(self, order: int, index_column: str, file_path: str):
         self.index_column = index_column
         self.order = order
         self.max_keys = order - 1
         self.min_keys = (order + 1) // 2 - 1
-        self.key_field = index_column
         self.file_path = file_path + ".dat"
-        self.page_size = 4096
-
         self.performance = PerformanceTracker()
 
+        self.root_node_id = self.FIRST_DATA_NODE_ID
+        self.next_available_node_id = self.FIRST_DATA_NODE_ID + 1
+        self._metadata_dirty = False
+
+        self.index_record_class = None
+        self.value_type_size = None
+        self.index_record_size = None
+        self.key_type = None
+        self.key_size = None
+        self.key_storage_size = None
+        self.NODE_SIZE = None
+        self.internal_node_size = None
+        self.leaf_node_size = None
+
         if not os.path.exists(self.file_path):
-            # Crear archivo nuevo
-            self.next_page_id = 2  # Página 1 será la raíz
-            self.root_page_id = 1
-            self._initialize_file()
+            with open(self.file_path, 'wb') as f:
+                f.write(b'\x00' * 8192)
         else:
-            # Leer metadata existente
-            self._read_metadata()
+            self._load_tree_metadata()
 
-    def _initialize_file(self):
-        """Inicializa archivo nuevo con metadata y raíz"""
-        # Crear archivo con página de metadata (primeros 16 bytes)
+    def _initialize_index_record_info(self, index_record: IndexRecord):
+        if self.index_record_class is None:
+            self.index_record_class = IndexRecord
+            self.value_type_size = index_record.value_type_size
+            self.index_record_size = index_record.RECORD_SIZE
+            
+            for field_name, field_type, field_size in self.value_type_size:
+                if field_name == "index_value":
+                    self.key_type = field_type
+                    self.key_size = field_size
+                    break
+            
+            self._calculate_node_sizes()
+            self._persist_metadata()
+
+    def _calculate_node_sizes(self):
+        header_size = 13
+        
+        if self.key_type == "INT":
+            self.key_storage_size = 4
+        elif self.key_type == "FLOAT":
+            self.key_storage_size = 4
+        elif self.key_type == "CHAR":
+            self.key_storage_size = self.key_size
+        else:
+            raise ValueError(f"Unsupported key type: {self.key_type}")
+        
+        self.internal_node_size = (
+            header_size + 
+            (self.max_keys * self.key_storage_size) + 
+            ((self.max_keys + 1) * 4)
+        )
+        
+        self.leaf_node_size = (
+            header_size + 
+            8 +  # 8 bytes para los pointers de hojas vecinas
+            (self.max_keys * (self.key_storage_size + self.index_record_size))
+        )
+        
+        self.NODE_SIZE = max(self.internal_node_size, self.leaf_node_size)
+        self.NODE_SIZE = ((self.NODE_SIZE + 511) // 512) * 512
+
+    def _pack_key(self, key: Any) -> bytes:
+        if self.key_type == "INT":
+            return struct.pack('i', int(key))
+        elif self.key_type == "FLOAT":
+            return struct.pack('f', float(key))
+        elif self.key_type == "CHAR":
+            if isinstance(key, bytes):
+                key_bytes = key
+            elif isinstance(key, str):
+                key_bytes = key.encode('utf-8')
+            else:
+                key_bytes = str(key).encode('utf-8')
+            return key_bytes[:self.key_size].ljust(self.key_size, b'\x00')
+        else:
+            raise ValueError(f"Unsupported key type: {self.key_type}")
+
+    def _unpack_key(self, data: bytes) -> Any:
+        if self.key_type == "INT":
+            return struct.unpack('i', data)[0]
+        elif self.key_type == "FLOAT":
+            return struct.unpack('f', data)[0]
+        elif self.key_type == "CHAR":
+            return data
+        else:
+            raise ValueError(f"Unsupported key type: {self.key_type}")
+
+    def _normalize_key(self, key: Any) -> Any:
+        if self.key_type == "CHAR":
+            if isinstance(key, bytes):
+                return key.decode('utf-8').rstrip('\x00').strip()
+            elif isinstance(key, str):
+                return key.rstrip('\x00').strip()
+        return key
+
+    def _initialize_new_tree(self):
         with open(self.file_path, 'wb') as f:
-            # Escribir metadata inicial
-            f.write(self.root_page_id.to_bytes(8, 'little'))
-            f.write(self.next_page_id.to_bytes(8, 'little'))
+            f.write(b'\x00' * 8192)
 
-        # Crear raíz inicial (hoja) en página 1
         root = LeafNode()
-        root.page_id = 1
-        self._write_page(1, root)
+        root.node_id = self.FIRST_DATA_NODE_ID
+        root.parent_node_id = None
+        root.prev_leaf_id = None
+        root.next_leaf_id = None
 
-    def _write_metadata(self):
+        self._metadata_dirty = True
+
+    def _load_tree_metadata(self):
         try:
-            if not os.path.exists(self.file_path):
-                with open(self.file_path, 'wb') as f:
-                    f.write(b'\x00' * 16)
+            with open(self.file_path, 'rb') as f:
+                f.seek(0)
+                metadata_bytes = f.read(8192)
+
+                if len(metadata_bytes) < 24 or metadata_bytes == b'\x00' * 8192:
+                    self.root_node_id = self.FIRST_DATA_NODE_ID
+                    self.next_available_node_id = self.FIRST_DATA_NODE_ID + 1
+                    return
+
+                magic = struct.unpack('4s', metadata_bytes[0:4])[0]
+                if magic != b'BPT+':
+                    self.root_node_id = self.FIRST_DATA_NODE_ID
+                    self.next_available_node_id = self.FIRST_DATA_NODE_ID + 1
+                    return
+
+                version, root_id, next_id, order, record_size = struct.unpack('iiiii', metadata_bytes[4:24])
+                
+                self.root_node_id = root_id
+                self.next_available_node_id = next_id
+                self.index_record_size = record_size
+                
+                offset = 24
+                if offset + 4 > len(metadata_bytes):
+                    return
+
+                num_fields, = struct.unpack('i', metadata_bytes[offset:offset+4])
+                offset += 4
+
+                self.value_type_size = []
+                for i in range(num_fields):
+                    if offset + 4 > len(metadata_bytes):
+                        return
+
+                    field_name_len, = struct.unpack('i', metadata_bytes[offset:offset+4])
+                    offset += 4
+
+                    if offset + field_name_len > len(metadata_bytes):
+                        return
+
+                    field_name = metadata_bytes[offset:offset+field_name_len].decode('utf-8')
+                    offset += field_name_len
+
+                    if offset + 4 > len(metadata_bytes):
+                        return
+
+                    field_type_len, = struct.unpack('i', metadata_bytes[offset:offset+4])
+                    offset += 4
+
+                    if offset + field_type_len > len(metadata_bytes):
+                        return
+
+                    field_type = metadata_bytes[offset:offset+field_type_len].decode('utf-8')
+                    offset += field_type_len
+
+                    if offset + 4 > len(metadata_bytes):
+                        return
+
+                    field_size, = struct.unpack('i', metadata_bytes[offset:offset+4])
+                    offset += 4
+                    
+                    self.value_type_size.append((field_name, field_type, field_size))
+                
+                self.index_record_class = IndexRecord
+                
+                for field_name, field_type, field_size in self.value_type_size:
+                    if field_name == "index_value":
+                        self.key_type = field_type
+                        self.key_size = field_size
+                        break
+                
+                self._calculate_node_sizes()
+
+        except Exception as e:
+            print(f"Error loading metadata: {e}")
+            self.root_node_id = self.FIRST_DATA_NODE_ID
+            self.next_available_node_id = self.FIRST_DATA_NODE_ID + 1
+
+    def _persist_metadata(self):
+        if self.value_type_size is None or self.index_record_size is None:
+            return
+
+        self.performance.track_write()
+
+        try:
+            metadata_parts = []
+            
+            metadata_parts.append(struct.pack('4siiii', 
+                b'BPT+', 1, self.root_node_id, self.next_available_node_id, self.order
+            ))
+            
+            metadata_parts.append(struct.pack('ii', self.index_record_size, len(self.value_type_size)))
+            
+            for field_name, field_type, field_size in self.value_type_size:
+                name_bytes = field_name.encode('utf-8')
+                type_bytes = field_type.encode('utf-8')
+                
+                metadata_parts.append(struct.pack('iii', len(name_bytes), len(type_bytes), field_size))
+                metadata_parts.append(name_bytes)
+                metadata_parts.append(type_bytes)
+            
+            metadata_bytes = b''.join(metadata_parts)
+
+            if len(metadata_bytes) > self.NODE_SIZE:
+                raise ValueError(f"Metadata too large: {len(metadata_bytes)} > {self.NODE_SIZE}")
+
+            padded_data = metadata_bytes + b'\x00' * (self.NODE_SIZE - len(metadata_bytes))
 
             with open(self.file_path, 'r+b') as f:
                 f.seek(0)
-                f.write(self.root_page_id.to_bytes(8, 'little'))
-                f.write(self.next_page_id.to_bytes(8, 'little'))
+                f.write(padded_data)
                 f.flush()
-        except Exception as e:
-            print(f"Error writing metadata: {e}")
 
-    def _read_metadata(self):
-        try:
-            if os.path.exists(self.file_path):
-                with open(self.file_path, 'rb') as f:
-                    f.seek(0)
-                    root_bytes = f.read(8)
-                    next_bytes = f.read(8)
-                    if len(root_bytes) == 8 and len(next_bytes) == 8:
-                        self.root_page_id = int.from_bytes(root_bytes, 'little')
-                        self.next_page_id = int.from_bytes(next_bytes, 'little')
-                    else:
-                        self.root_page_id = 1
-                        self.next_page_id = 2
-            else:
-                self.root_page_id = 1
-                self.next_page_id = 2
+            self._metadata_dirty = False
+
         except Exception as e:
-            print(f"Error reading metadata: {e}")
-            self.root_page_id = 1
-            self.next_page_id = 2
-    
-    def _get_page_offset(self, page_id: int) -> int:
-        return 16 + (page_id * self.page_size) 
-    
-    def _read_page(self, page_id: int) -> Optional[Node]:
-        if page_id is None or page_id < 1:  # Página 0 es metadata
+            print(f"Error persisting metadata: {e}")
+            raise
+
+    def _get_node_offset(self, node_id: int) -> int:
+        return node_id * self.NODE_SIZE
+
+    def _read_node(self, node_id: int) -> Optional[Node]:
+        if node_id is None or node_id == self.METADATA_NODE_ID:
+            return None
+        
+        if self.NODE_SIZE is None:
             return None
 
         self.performance.track_read()
 
-        if not os.path.exists(self.file_path):
-            return None
-
         try:
+            offset = self._get_node_offset(node_id)
+
             with open(self.file_path, 'rb') as f:
-                offset = self._get_page_offset(page_id)
                 f.seek(offset)
-                page_data = f.read(self.page_size)
+                node_bytes = f.read(self.NODE_SIZE)
 
-                if len(page_data) < self.page_size:
+
+                if len(node_bytes) < 13 or (node_bytes[0] == 0 and node_bytes[1] == 0):
                     return None
 
-                # Verificar si la página está vacía
-                if page_data == b'\x00' * self.page_size:
+                try:
+                    node_type = struct.unpack('?', node_bytes[0:1])[0]
+                    num_keys = struct.unpack('i', node_bytes[1:5])[0]
+                    node_id_read = struct.unpack('i', node_bytes[5:9])[0]
+                    parent_id = struct.unpack('i', node_bytes[9:13])[0]
+                except struct.error as e:
                     return None
+                
+                if parent_id == self.NULL_NODE_ID:
+                    parent_id = None
 
-                node = pickle.loads(page_data.rstrip(b'\x00'))
-                node.page_id = page_id
-                return node
-        except (EOFError, pickle.UnpicklingError, OSError):
+                data_offset = 13
+                normalize_key = self.key_type == "CHAR"
+
+                if node_type:
+                    return LeafNode.unpack(
+                        node_bytes, data_offset, num_keys, node_id_read, parent_id,
+                        self._unpack_key, self.key_storage_size, self.index_record_size,
+                        self.index_record_class, self.value_type_size, "index_value",
+                        self.NULL_NODE_ID, normalize_key
+                    )
+                else:
+                    return InternalNode.unpack(
+                        node_bytes, data_offset, num_keys, node_id_read, parent_id,
+                        self._unpack_key, self.key_storage_size, normalize_key
+                    )
+
+        except Exception as e:
+            print(f"Error reading node {node_id}: {e}")
             return None
 
-    def _write_page(self, page_id: int, node: Node):
-        if page_id < 1:  # No permitir escribir en página 0 (metadata)
-            raise Exception("Cannot write to page 0 (metadata page)")
+    def _write_node(self, node_id: int, node: Node):
+        if node_id == self.METADATA_NODE_ID:
+            raise ValueError("Cannot write data to metadata node (node 0)")
+
+        if self.NODE_SIZE is None:
+            return
 
         self.performance.track_write()
 
-        # Asegurar que el directorio existe
-        dir_path = os.path.dirname(self.file_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
+        try:
 
-        node.page_id = page_id
-        serialized = pickle.dumps(node)
+            if isinstance(node, LeafNode):
+                node_bytes = node.pack(self._pack_key, self.index_record_size, self.NULL_NODE_ID)
+            else:
+                node_bytes = node.pack(self._pack_key, self.NULL_NODE_ID)
 
-        if len(serialized) > self.page_size:
-            raise Exception(f"Page {page_id} too large: {len(serialized)} > {self.page_size}")
+            padded_data = node_bytes.ljust(self.NODE_SIZE, b'\x00')
 
-        padded_data = serialized + b'\x00' * (self.page_size - len(serialized))
+            offset = self._get_node_offset(node_id)
 
-        # Asegurar que el archivo existe con metadata
-        if not os.path.exists(self.file_path):
-            with open(self.file_path, 'wb') as f:
-                f.write(b'\x00' * 16)  # Metadata vacía
+            if not os.path.exists(self.file_path):
+                with open(self.file_path, 'wb') as f:
+                    f.write(b'\x00' * self.NODE_SIZE)
 
-        # Calcular tamaño necesario del archivo
-        offset = self._get_page_offset(page_id)
-        required_size = offset + self.page_size
+            current_size = os.path.getsize(self.file_path)
+            required_size = (node_id + 1) * self.NODE_SIZE
 
-        # Extender archivo si es necesario
-        current_size = os.path.getsize(self.file_path)
-        if current_size < required_size:
-            with open(self.file_path, 'ab') as f:
-                f.write(b'\x00' * (required_size - current_size))
+            if current_size < required_size:
+                with open(self.file_path, 'ab') as f:
+                    f.write(b'\x00' * (required_size - current_size))
 
-        # Escribir página
-        with open(self.file_path, 'r+b') as f:
-            f.seek(offset)
-            f.write(padded_data)
-            f.flush()
-    
-    def _allocate_page_id(self) -> int:
-        page_id = self.next_page_id
-        self.next_page_id += 1
-        self._write_metadata()
-        return page_id
+            with open(self.file_path, 'r+b') as f:
+                f.seek(offset)
+                f.write(padded_data)
+                f.flush()
+
+        except Exception as e:
+            print(f"Error writing node {node_id}: {e}")
+            raise
+
+    def _mark_node_as_deleted(self, node_id: int):
+        if node_id == self.METADATA_NODE_ID:
+            raise ValueError("Cannot delete metadata node")
+
+        self.performance.track_write()
+
+        try:
+            offset = self._get_node_offset(node_id)
+
+            if os.path.exists(self.file_path):
+                with open(self.file_path, 'r+b') as f:
+                    f.seek(offset)
+                    f.write(b'\x00' * self.NODE_SIZE)
+                    f.flush()
+        except Exception as e:
+            print(f"Error deleting node {node_id}: {e}")
+
+    def _allocate_node_id(self) -> int:
+        node_id = self.next_available_node_id
+        self.next_available_node_id += 1
+        self._metadata_dirty = True
+        return node_id
+
+    def _flush_metadata_if_needed(self):
+        if self._metadata_dirty:
+            self._persist_metadata()
 
     def search(self, key: Any) -> OperationResult:
-       
         self.performance.start_operation()
-        
-        self._read_metadata()
-        leaf_node = self._find_leaf_node(key)
-        pos = bisect.bisect_left(leaf_node.keys, key)
-        
+
+        if self.NODE_SIZE is None:
+            return self.performance.end_operation([])
+
+        key = self._normalize_key(key)
+
+        leaf = self._find_leaf_for_key(key)
+        if leaf is None:
+            return self.performance.end_operation([])
+
         primary_keys = []
-        while pos < len(leaf_node.keys) and leaf_node.keys[pos] == key:
-            # Extract the primary_key value from PrimaryKeyPointer
-            primary_keys.append(leaf_node.values[pos].primary_key)
-            pos += 1
+        pos = bisect.bisect_left(leaf.keys, key)
+
+        # Navigate through leaf nodes to find ALL instances of the key
+        while leaf is not None:
+            # Search in current leaf
+            while pos < len(leaf.keys) and leaf.keys[pos] == key:
+                primary_keys.append(leaf.index_records[pos].primary_key)
+                pos += 1
+
+            # If we've moved past the key or reached end of leaf, check next leaf
+            if pos >= len(leaf.keys) or leaf.keys[pos] > key:
+                if leaf.next_leaf_id is not None:
+                    leaf = self._read_node(leaf.next_leaf_id)
+                    pos = 0
+                    # Check if next leaf starts with our key
+                    if leaf and len(leaf.keys) > 0 and leaf.keys[0] == key:
+                        continue  # Keep searching in next leaf
+                    else:
+                        break  # No more instances of this key
+                else:
+                    break  # No more leaves
+            else:
+                break  # Found a key > search_key, so we're done
 
         return self.performance.end_operation(primary_keys)
-
-    def insert(self, index_record : IndexRecord) -> OperationResult:
-
+    
+    def insert(self, index_record: IndexRecord) -> OperationResult:
         self.performance.start_operation()
 
-        secondary_key = index_record.index_value
-        primary_key = index_record.primary_key
+        try:
+            if self.index_record_class is None:
+                self._initialize_index_record_info(index_record)
+                root = LeafNode()
+                root.node_id = self.FIRST_DATA_NODE_ID
+                root.parent_node_id = None
+                root.prev_leaf_id = None
+                root.next_leaf_id = None
+                self._write_node(self.FIRST_DATA_NODE_ID, root)
 
-        primary_key_pointer = PrimaryKeyPointer(primary_key)
-
-        self._read_metadata()
-        root = self._read_page(self.root_page_id)
-        self._insert_recursive(root, secondary_key, primary_key_pointer)
-
-        return self.performance.end_operation(True)
-
-    def _insert_recursive(self, node: Node, key: Any, primary_key_pointer: PrimaryKeyPointer):
-        if isinstance(node, LeafNode):
-            pos = bisect.bisect_left(node.keys, key)
-            node.keys.insert(pos, key)
-            node.values.insert(pos, primary_key_pointer)
+            key = self._normalize_key(index_record.index_value)
+            success = self._insert_into_tree(self.root_node_id, key, index_record)
             
-            self._write_page(node.page_id, node)
+            self._flush_metadata_if_needed()
             
-            if node.is_full(self.max_keys):
-                self._split_leaf(node)
-        else:
-            pos = bisect.bisect_right(node.keys, key)
-            child_id = node.children_ids[pos]
-            child = self._read_page(child_id)
-            self._insert_recursive(child, key, primary_key_pointer)
+            return self.performance.end_operation(success)
+        except Exception as e:
+            return self.performance.end_operation(False)
 
     def delete(self, secondary_key: Any, primary_key: Any = None) -> OperationResult:
         self.performance.start_operation()
+        
+        secondary_key = self._normalize_key(secondary_key)
 
         if primary_key is not None:
             result = self._delete_by_keys(secondary_key, primary_key)
@@ -258,398 +584,444 @@ class BPlusTreeUnclusteredIndex:
             return self.performance.end_operation(result)
 
     def _delete_by_keys(self, secondary_key: Any, primary_key: Any) -> bool:
-        self._read_metadata()
-        leaf = self._find_leaf_node(secondary_key)
-
-        for i, (key, value) in enumerate(zip(leaf.keys, leaf.values)):
-            if key == secondary_key and value.primary_key == primary_key:
+        leaf = self._find_leaf_for_key(secondary_key)
+        
+        for i in range(len(leaf.keys)):
+            if leaf.keys[i] == secondary_key and leaf.index_records[i].primary_key == primary_key:
                 leaf.keys.pop(i)
-                leaf.values.pop(i)
-                self._write_page(leaf.page_id, leaf)
+                leaf.index_records.pop(i)
+                self._write_node(leaf.node_id, leaf)
 
-                if leaf.page_id != self.root_page_id and leaf.is_underflow(self.min_keys):
+                if leaf.node_id != self.root_node_id and leaf.is_underflow(self.min_keys):
                     self._handle_leaf_underflow(leaf)
 
-                # Verificar si la raíz necesita reducirse
-                root = self._read_page(self.root_page_id)
-                if isinstance(root, InternalNode) and len(root.keys) == 0:
-                    if len(root.children_ids) > 0:
-                        self.root_page_id = root.children_ids[0]
-                        new_root = self._read_page(self.root_page_id)
-                        new_root.parent_id = None
-                        self._write_page(self.root_page_id, new_root)
-                        # Persistir cambio de raíz
-                        self._write_metadata()
+                self._reduce_tree_height_if_needed()
+                self._flush_metadata_if_needed()
 
                 return True
 
         return False
 
-    def _delete_all_by_secondary_key(self, secondary_key: Any) -> list:
-        self._read_metadata()
+    def _delete_all_by_secondary_key(self, secondary_key: Any) -> List[Any]:
+        leaf = self._find_leaf_for_key(secondary_key)
         deleted_pks = []
-        leaf = self._find_leaf_node(secondary_key)
 
         indices_to_delete = []
-        for i, (key, value) in enumerate(zip(leaf.keys, leaf.values)):
-            if key == secondary_key:
+        for i in range(len(leaf.keys)):
+            if leaf.keys[i] == secondary_key:
                 indices_to_delete.append(i)
-                deleted_pks.append(value.primary_key)
+                deleted_pks.append(leaf.index_records[i].primary_key)
 
         for i in reversed(indices_to_delete):
             leaf.keys.pop(i)
-            leaf.values.pop(i)
+            leaf.index_records.pop(i)
 
         if indices_to_delete:
-            self._write_page(leaf.page_id, leaf)
+            self._write_node(leaf.node_id, leaf)
 
-            if leaf.page_id != self.root_page_id and leaf.is_underflow(self.min_keys):
+            if leaf.node_id != self.root_node_id and leaf.is_underflow(self.min_keys):
                 self._handle_leaf_underflow(leaf)
 
-            root = self._read_page(self.root_page_id)
-            if isinstance(root, InternalNode) and len(root.keys) == 0:
-                if len(root.children_ids) > 0:
-                    self.root_page_id = root.children_ids[0]
-                    new_root = self._read_page(self.root_page_id)
-                    new_root.parent_id = None
-                    self._write_page(self.root_page_id, new_root)
-                    self._write_metadata()
+            self._reduce_tree_height_if_needed()
+            self._flush_metadata_if_needed()
 
         return deleted_pks
 
     def range_search(self, start_key: Any, end_key: Any) -> OperationResult:
-       
         self.performance.start_operation()
         
+        if self.NODE_SIZE is None:
+            return self.performance.end_operation([])
+        
+        start_key = self._normalize_key(start_key)
+        end_key = self._normalize_key(end_key)
+
         results = []
-        self._read_metadata()
-        leaf = self._find_leaf_node(start_key)
+        leaf = self._find_leaf_for_key(start_key)
         
+        if leaf is None:
+            return self.performance.end_operation([])
+
         pos = bisect.bisect_left(leaf.keys, start_key)
-        
+
         while leaf is not None:
             for i in range(pos, len(leaf.keys)):
                 if leaf.keys[i] > end_key:
                     return self.performance.end_operation(results)
                 if leaf.keys[i] >= start_key:
-                    # Extract the primary_key value from PrimaryKeyPointer
-                    results.append(leaf.values[i].primary_key)
-            
-            if leaf.next_id is not None:
-                leaf = self._read_page(leaf.next_id)
+                    results.append(leaf.index_records[i].primary_key)
+
+            if leaf.next_leaf_id is not None:
+                leaf = self._read_node(leaf.next_leaf_id)
+                pos = 0
             else:
-                leaf = None
-            pos = 0
-        
+                break
+
         return self.performance.end_operation(results)
 
-    def _find_leaf_node(self, key: Any) -> LeafNode:
-        current = self._read_page(self.root_page_id)
-        while isinstance(current, InternalNode):
+    def _find_leaf_for_key(self, key: Any) -> Optional[LeafNode]:
+        if self.NODE_SIZE is None:
+            return None
+            
+        current_id = self.root_node_id
+        
+        while True:
+            current = self._read_node(current_id)
+            
+            if current is None:
+                return None
+            
+            if isinstance(current, LeafNode):
+                return current
+            
             pos = bisect.bisect_right(current.keys, key)
-            child_id = current.children_ids[pos]
-            current = self._read_page(child_id)
-        return current
+            current_id = current.child_node_ids[pos]
 
-    def _split_leaf(self, leaf: LeafNode):
-        mid = len(leaf.keys) // 2
+    def _insert_into_tree(self, node_id: int, key: Any, index_record: IndexRecord) -> bool:
+        node = self._read_node(node_id)
+
+        if isinstance(node, LeafNode):
+            return self._insert_into_leaf(node, key, index_record)
+        else:
+            return self._insert_into_internal(node, key, index_record)
+
+    def _insert_into_leaf(self, leaf: LeafNode, key: Any, index_record: IndexRecord) -> bool:
+        pos = bisect.bisect_right(leaf.keys, key)
+
+        leaf.keys.insert(pos, key)
+        leaf.index_records.insert(pos, index_record)
+        self._write_node(leaf.node_id, leaf)
+
+        if leaf.is_full(self.max_keys):
+            self._split_leaf_node(leaf)
+
+        return True
+
+    def _insert_into_internal(self, internal: InternalNode, key: Any, index_record: IndexRecord) -> bool:
+        pos = bisect.bisect_right(internal.keys, key)
+        child_id = internal.child_node_ids[pos]
+        return self._insert_into_tree(child_id, key, index_record)
+
+    def _split_leaf_node(self, leaf: LeafNode):
+
         new_leaf = LeafNode()
-        
-        new_page_id = self._allocate_page_id()
-        new_leaf.page_id = new_page_id
-        
-        new_leaf.keys = leaf.keys[mid:]
-        new_leaf.values = leaf.values[mid:]
-        new_leaf.parent_id = leaf.parent_id
-        
-        new_leaf.next_id = leaf.next_id
-        new_leaf.previous_id = leaf.page_id
-        
-        if leaf.next_id is not None:
-            next_leaf = self._read_page(leaf.next_id)
-            next_leaf.previous_id = new_leaf.page_id
-            self._write_page(leaf.next_id, next_leaf)
-        
-        leaf.next_id = new_leaf.page_id
-        
-        leaf.keys = leaf.keys[:mid]
-        leaf.values = leaf.values[:mid]
-        
-        self._write_page(new_leaf.page_id, new_leaf)
-        self._write_page(leaf.page_id, leaf)
-        
-        promote_key = new_leaf.keys[0]
-        self._promote_key(leaf, promote_key, new_leaf)
+        new_leaf.node_id = self._allocate_node_id()
+        new_leaf.parent_node_id = leaf.parent_node_id
 
-    def _split_internal(self, internal: InternalNode):
+
+        mid = len(leaf.keys) // 2
+        new_leaf.keys = leaf.keys[mid:]
+        new_leaf.index_records = leaf.index_records[mid:]
+
+        new_leaf.next_leaf_id = leaf.next_leaf_id
+        new_leaf.prev_leaf_id = leaf.node_id
+        leaf.next_leaf_id = new_leaf.node_id
+
+        if new_leaf.next_leaf_id is not None:
+            next_leaf = self._read_node(new_leaf.next_leaf_id)
+            next_leaf.prev_leaf_id = new_leaf.node_id
+            self._write_node(next_leaf.node_id, next_leaf)
+
+        leaf.keys = leaf.keys[:mid]
+        leaf.index_records = leaf.index_records[:mid]
+
+        self._write_node(leaf.node_id, leaf)
+        self._write_node(new_leaf.node_id, new_leaf)
+
+        promote_key = new_leaf.keys[0]
+        self._promote_key_to_parent(leaf, promote_key, new_leaf.node_id)
+
+    def _split_internal_node(self, internal: InternalNode):
+        new_internal = InternalNode()
+        new_internal.node_id = self._allocate_node_id()
+        new_internal.parent_node_id = internal.parent_node_id
+
         mid = len(internal.keys) // 2
         promote_key = internal.keys[mid]
-        
-        new_internal = InternalNode()
-        new_page_id = self._allocate_page_id()
-        new_internal.page_id = new_page_id
-        
-        new_internal.keys = internal.keys[mid + 1:]
-        new_internal.children_ids = internal.children_ids[mid + 1:]
-        new_internal.parent_id = internal.parent_id
-        
-        for child_id in new_internal.children_ids:
-            child = self._read_page(child_id)
-            child.parent_id = new_internal.page_id
-            self._write_page(child_id, child)
-        
-        internal.keys = internal.keys[:mid]
-        internal.children_ids = internal.children_ids[:mid + 1]
-        
-        self._write_page(new_internal.page_id, new_internal)
-        self._write_page(internal.page_id, internal)
-        
-        self._promote_key(internal, promote_key, new_internal)
 
-    def _promote_key(self, left_child: Node, key: Any, right_child: Node):
-        if left_child.parent_id is None:
+        new_internal.keys = internal.keys[mid + 1:]
+        new_internal.child_node_ids = internal.child_node_ids[mid + 1:]
+
+        internal.keys = internal.keys[:mid]
+        internal.child_node_ids = internal.child_node_ids[:mid + 1]
+
+        for child_id in new_internal.child_node_ids:
+            child = self._read_node(child_id)
+            child.parent_node_id = new_internal.node_id
+            self._write_node(child_id, child)
+
+        self._write_node(internal.node_id, internal)
+        self._write_node(new_internal.node_id, new_internal)
+
+        self._promote_key_to_parent(internal, promote_key, new_internal.node_id)
+
+    def _promote_key_to_parent(self, left_child: Node, key: Any, right_child_id: int):
+        if left_child.parent_node_id is None:
             new_root = InternalNode()
-            new_root_id = self._allocate_page_id()
-            new_root.page_id = new_root_id
+            new_root.node_id = self._allocate_node_id()
+            new_root.parent_node_id = None
             new_root.keys = [key]
-            new_root.children_ids = [left_child.page_id, right_child.page_id]
-            new_root.parent_id = None
-            
-            left_child.parent_id = new_root_id
-            right_child.parent_id = new_root_id
-            
-            self._write_page(new_root_id, new_root)
-            self._write_page(left_child.page_id, left_child)
-            self._write_page(right_child.page_id, right_child)
-            
-            self.root_page_id = new_root_id
-            self._write_metadata()
+            new_root.child_node_ids = [left_child.node_id, right_child_id]
+
+            left_child.parent_node_id = new_root.node_id
+            right_child = self._read_node(right_child_id)
+            right_child.parent_node_id = new_root.node_id
+
+            self._write_node(left_child.node_id, left_child)
+            self._write_node(right_child_id, right_child)
+            self._write_node(new_root.node_id, new_root)
+
+            self.root_node_id = new_root.node_id
+            self._metadata_dirty = True
         else:
-            parent = self._read_page(left_child.parent_id)
+            parent = self._read_node(left_child.parent_node_id)
+
+            if not isinstance(parent, InternalNode):
+                raise ValueError(f"Parent must be internal node, got {type(parent)}")
+
             pos = bisect.bisect_left(parent.keys, key)
             parent.keys.insert(pos, key)
-            parent.children_ids.insert(pos + 1, right_child.page_id)
-            right_child.parent_id = parent.page_id
-            
-            self._write_page(parent.page_id, parent)
-            self._write_page(right_child.page_id, right_child)
+            parent.child_node_ids.insert(pos + 1, right_child_id)
+
+            right_child = self._read_node(right_child_id)
+            right_child.parent_node_id = parent.node_id
+            self._write_node(right_child_id, right_child)
+
+            self._write_node(left_child.node_id, left_child)
+            self._write_node(parent.node_id, parent)
 
             if parent.is_full(self.max_keys):
-                self._split_internal(parent)
+                self._split_internal_node(parent)
+
+    def _reduce_tree_height_if_needed(self):
+        root = self._read_node(self.root_node_id)
+
+        if isinstance(root, InternalNode) and len(root.keys) == 0:
+            if len(root.child_node_ids) > 0:
+                old_root_id = root.node_id
+                self.root_node_id = root.child_node_ids[0]
+
+                new_root = self._read_node(self.root_node_id)
+                new_root.parent_node_id = None
+                self._write_node(self.root_node_id, new_root)
+
+                self._metadata_dirty = True
+                self._mark_node_as_deleted(old_root_id)
 
     def _handle_leaf_underflow(self, leaf: LeafNode):
-        if leaf.parent_id is None:
+        if leaf.parent_node_id is None:
             return
-        
-        parent = self._read_page(leaf.parent_id)
-        if not parent:
-            return
-        
-        leaf_index = parent.children_ids.index(leaf.page_id)
-        
+
+        parent = self._read_node(leaf.parent_node_id)
+        leaf_index = parent.child_node_ids.index(leaf.node_id)
+
         if leaf_index > 0:
-            left_sibling_id = parent.children_ids[leaf_index - 1]
-            left_sibling = self._read_page(left_sibling_id)
+            left_sibling_id = parent.child_node_ids[leaf_index - 1]
+            left_sibling = self._read_node(left_sibling_id)
             if isinstance(left_sibling, LeafNode) and len(left_sibling.keys) > self.min_keys:
                 self._borrow_from_left_leaf(leaf, left_sibling, parent, leaf_index)
                 return
-        
-        if leaf_index < len(parent.children_ids) - 1:
-            right_sibling_id = parent.children_ids[leaf_index + 1]
-            right_sibling = self._read_page(right_sibling_id)
+
+        if leaf_index < len(parent.child_node_ids) - 1:
+            right_sibling_id = parent.child_node_ids[leaf_index + 1]
+            right_sibling = self._read_node(right_sibling_id)
             if isinstance(right_sibling, LeafNode) and len(right_sibling.keys) > self.min_keys:
                 self._borrow_from_right_leaf(leaf, right_sibling, parent, leaf_index)
                 return
-        
+
         if leaf_index > 0:
-            left_sibling_id = parent.children_ids[leaf_index - 1]
-            left_sibling = self._read_page(left_sibling_id)
+            left_sibling_id = parent.child_node_ids[leaf_index - 1]
+            left_sibling = self._read_node(left_sibling_id)
             if isinstance(left_sibling, LeafNode):
                 self._merge_leaf_with_left(leaf, left_sibling, parent, leaf_index)
         else:
-            right_sibling_id = parent.children_ids[leaf_index + 1]
-            right_sibling = self._read_page(right_sibling_id)
+            right_sibling_id = parent.child_node_ids[leaf_index + 1]
+            right_sibling = self._read_node(right_sibling_id)
             if isinstance(right_sibling, LeafNode):
                 self._merge_leaf_with_right(leaf, right_sibling, parent, leaf_index)
 
-    def _borrow_from_left_leaf(self, leaf: LeafNode, left_sibling: LeafNode, parent: InternalNode, leaf_index: int):
+    def _borrow_from_left_leaf(self, leaf: LeafNode, left_sibling: LeafNode,
+                                parent: InternalNode, leaf_index: int):
         borrowed_key = left_sibling.keys.pop()
-        borrowed_value = left_sibling.values.pop()
-        
-        leaf.keys.insert(0, borrowed_key)
-        leaf.values.insert(0, borrowed_value)
-        
-        parent.keys[leaf_index - 1] = leaf.keys[0]
-        
-        self._write_page(leaf.page_id, leaf)
-        self._write_page(left_sibling.page_id, left_sibling)
-        self._write_page(parent.page_id, parent)
+        borrowed_record = left_sibling.index_records.pop()
 
-    def _borrow_from_right_leaf(self, leaf: LeafNode, right_sibling: LeafNode, parent: InternalNode, leaf_index: int):
+        leaf.keys.insert(0, borrowed_key)
+        leaf.index_records.insert(0, borrowed_record)
+
+        parent.keys[leaf_index - 1] = leaf.keys[0]
+
+        self._write_node(left_sibling.node_id, left_sibling)
+        self._write_node(leaf.node_id, leaf)
+        self._write_node(parent.node_id, parent)
+
+    def _borrow_from_right_leaf(self, leaf: LeafNode, right_sibling: LeafNode,
+                                 parent: InternalNode, leaf_index: int):
         borrowed_key = right_sibling.keys.pop(0)
-        borrowed_value = right_sibling.values.pop(0)
+        borrowed_record = right_sibling.index_records.pop(0)
 
         leaf.keys.append(borrowed_key)
-        leaf.values.append(borrowed_value)
+        leaf.index_records.append(borrowed_record)
 
-        # Actualizar separador: debe ser la primera clave del hijo derecho
-        if len(right_sibling.keys) > 0:
-            parent.keys[leaf_index] = right_sibling.keys[0]
-        else:
-            # No debería ocurrir si min_keys > 0
-            raise Exception("Right sibling became empty after borrowing")
+        parent.keys[leaf_index] = right_sibling.keys[0]
 
-        self._write_page(leaf.page_id, leaf)
-        self._write_page(right_sibling.page_id, right_sibling)
-        self._write_page(parent.page_id, parent)
+        self._write_node(right_sibling.node_id, right_sibling)
+        self._write_node(leaf.node_id, leaf)
+        self._write_node(parent.node_id, parent)
 
-    def _merge_leaf_with_left(self, leaf: LeafNode, left_sibling: LeafNode, parent: InternalNode, leaf_index: int):
+    def _merge_leaf_with_left(self, leaf: LeafNode, left_sibling: LeafNode,
+                               parent: InternalNode, leaf_index: int):
         left_sibling.keys.extend(leaf.keys)
-        left_sibling.values.extend(leaf.values)
-        
-        left_sibling.next_id = leaf.next_id
-        if leaf.next_id is not None:
-            next_leaf = self._read_page(leaf.next_id)
-            next_leaf.previous_id = left_sibling.page_id
-            self._write_page(leaf.next_id, next_leaf)
-        
-        parent.children_ids.pop(leaf_index)
+        left_sibling.index_records.extend(leaf.index_records)
+
+        left_sibling.next_leaf_id = leaf.next_leaf_id
+        if leaf.next_leaf_id is not None:
+            next_leaf = self._read_node(leaf.next_leaf_id)
+            next_leaf.prev_leaf_id = left_sibling.node_id
+            self._write_node(next_leaf.node_id, next_leaf)
+
+        parent.child_node_ids.pop(leaf_index)
         parent.keys.pop(leaf_index - 1)
-        
-        self._write_page(left_sibling.page_id, left_sibling)
-        self._write_page(parent.page_id, parent)
-        
-        if parent.page_id != self.root_page_id and parent.is_underflow(self.min_keys):
+
+        self._write_node(left_sibling.node_id, left_sibling)
+        self._write_node(parent.node_id, parent)
+        self._mark_node_as_deleted(leaf.node_id)
+
+        if parent.node_id != self.root_node_id and parent.is_underflow(self.min_keys):
             self._handle_internal_underflow(parent)
 
-    def _merge_leaf_with_right(self, leaf: LeafNode, right_sibling: LeafNode, parent: InternalNode, leaf_index: int):
+    def _merge_leaf_with_right(self, leaf: LeafNode, right_sibling: LeafNode,
+                                parent: InternalNode, leaf_index: int):
         leaf.keys.extend(right_sibling.keys)
-        leaf.values.extend(right_sibling.values)
-        
-        leaf.next_id = right_sibling.next_id
-        if right_sibling.next_id is not None:
-            next_leaf = self._read_page(right_sibling.next_id)
-            next_leaf.previous_id = leaf.page_id
-            self._write_page(right_sibling.next_id, next_leaf)
-        
-        parent.children_ids.pop(leaf_index + 1)
+        leaf.index_records.extend(right_sibling.index_records)
+
+        leaf.next_leaf_id = right_sibling.next_leaf_id
+        if right_sibling.next_leaf_id is not None:
+            next_leaf = self._read_node(right_sibling.next_leaf_id)
+            next_leaf.prev_leaf_id = leaf.node_id
+            self._write_node(next_leaf.node_id, next_leaf)
+
+        parent.child_node_ids.pop(leaf_index + 1)
         parent.keys.pop(leaf_index)
-        
-        self._write_page(leaf.page_id, leaf)
-        self._write_page(parent.page_id, parent)
-        
-        if parent.page_id != self.root_page_id and parent.is_underflow(self.min_keys):
+
+        self._write_node(leaf.node_id, leaf)
+        self._write_node(parent.node_id, parent)
+        self._mark_node_as_deleted(right_sibling.node_id)
+
+        if parent.node_id != self.root_node_id and parent.is_underflow(self.min_keys):
             self._handle_internal_underflow(parent)
 
     def _handle_internal_underflow(self, internal: InternalNode):
-        if internal.parent_id is None:
+        if internal.parent_node_id is None:
             return
-        
-        parent = self._read_page(internal.parent_id)
-        if not parent:
-            return
-        
-        internal_index = parent.children_ids.index(internal.page_id)
-        
+
+        parent = self._read_node(internal.parent_node_id)
+        internal_index = parent.child_node_ids.index(internal.node_id)
+
         if internal_index > 0:
-            left_sibling_id = parent.children_ids[internal_index - 1]
-            left_sibling = self._read_page(left_sibling_id)
+            left_sibling_id = parent.child_node_ids[internal_index - 1]
+            left_sibling = self._read_node(left_sibling_id)
             if isinstance(left_sibling, InternalNode) and len(left_sibling.keys) > self.min_keys:
                 self._borrow_from_left_internal(internal, left_sibling, parent, internal_index)
                 return
-        
-        if internal_index < len(parent.children_ids) - 1:
-            right_sibling_id = parent.children_ids[internal_index + 1]
-            right_sibling = self._read_page(right_sibling_id)
+
+        if internal_index < len(parent.child_node_ids) - 1:
+            right_sibling_id = parent.child_node_ids[internal_index + 1]
+            right_sibling = self._read_node(right_sibling_id)
             if isinstance(right_sibling, InternalNode) and len(right_sibling.keys) > self.min_keys:
                 self._borrow_from_right_internal(internal, right_sibling, parent, internal_index)
                 return
-        
+
         if internal_index > 0:
-            left_sibling_id = parent.children_ids[internal_index - 1]
-            left_sibling = self._read_page(left_sibling_id)
+            left_sibling_id = parent.child_node_ids[internal_index - 1]
+            left_sibling = self._read_node(left_sibling_id)
             if isinstance(left_sibling, InternalNode):
                 self._merge_internal_with_left(internal, left_sibling, parent, internal_index)
         else:
-            right_sibling_id = parent.children_ids[internal_index + 1]
-            right_sibling = self._read_page(right_sibling_id)
+            right_sibling_id = parent.child_node_ids[internal_index + 1]
+            right_sibling = self._read_node(right_sibling_id)
             if isinstance(right_sibling, InternalNode):
                 self._merge_internal_with_right(internal, right_sibling, parent, internal_index)
 
-    def _borrow_from_left_internal(self, internal: InternalNode, left_sibling: InternalNode, parent: InternalNode, internal_index: int):
+    def _borrow_from_left_internal(self, internal: InternalNode, left_sibling: InternalNode,
+                                    parent: InternalNode, internal_index: int):
         separator_key = parent.keys[internal_index - 1]
-        
         internal.keys.insert(0, separator_key)
-        borrowed_child_id = left_sibling.children_ids.pop()
-        internal.children_ids.insert(0, borrowed_child_id)
-        
-        borrowed_child = self._read_page(borrowed_child_id)
-        borrowed_child.parent_id = internal.page_id
-        self._write_page(borrowed_child_id, borrowed_child)
-        
+
+        borrowed_child_id = left_sibling.child_node_ids.pop()
+        internal.child_node_ids.insert(0, borrowed_child_id)
+
+        borrowed_child = self._read_node(borrowed_child_id)
+        borrowed_child.parent_node_id = internal.node_id
+        self._write_node(borrowed_child_id, borrowed_child)
+
         parent.keys[internal_index - 1] = left_sibling.keys.pop()
-        
-        self._write_page(left_sibling.page_id, left_sibling)
-        self._write_page(internal.page_id, internal)
-        self._write_page(parent.page_id, parent)
 
-    def _borrow_from_right_internal(self, internal: InternalNode, right_sibling: InternalNode, parent: InternalNode, internal_index: int):
+        self._write_node(left_sibling.node_id, left_sibling)
+        self._write_node(internal.node_id, internal)
+        self._write_node(parent.node_id, parent)
+
+    def _borrow_from_right_internal(self, internal: InternalNode, right_sibling: InternalNode,
+                                     parent: InternalNode, internal_index: int):
         separator_key = parent.keys[internal_index]
-        
         internal.keys.append(separator_key)
-        borrowed_child_id = right_sibling.children_ids.pop(0)
-        internal.children_ids.append(borrowed_child_id)
-        
-        borrowed_child = self._read_page(borrowed_child_id)
-        borrowed_child.parent_id = internal.page_id
-        self._write_page(borrowed_child_id, borrowed_child)
-        
-        parent.keys[internal_index] = right_sibling.keys.pop(0)
-        
-        self._write_page(right_sibling.page_id, right_sibling)
-        self._write_page(internal.page_id, internal)
-        self._write_page(parent.page_id, parent)
 
-    def _merge_internal_with_left(self, internal: InternalNode, left_sibling: InternalNode, parent: InternalNode, internal_index: int):
+        borrowed_child_id = right_sibling.child_node_ids.pop(0)
+        internal.child_node_ids.append(borrowed_child_id)
+
+        borrowed_child = self._read_node(borrowed_child_id)
+        borrowed_child.parent_node_id = internal.node_id
+        self._write_node(borrowed_child_id, borrowed_child)
+
+        parent.keys[internal_index] = right_sibling.keys.pop(0)
+
+        self._write_node(right_sibling.node_id, right_sibling)
+        self._write_node(internal.node_id, internal)
+        self._write_node(parent.node_id, parent)
+
+    def _merge_internal_with_left(self, internal: InternalNode, left_sibling: InternalNode,
+                                   parent: InternalNode, internal_index: int):
         separator_key = parent.keys[internal_index - 1]
-        
+
         left_sibling.keys.append(separator_key)
         left_sibling.keys.extend(internal.keys)
-        left_sibling.children_ids.extend(internal.children_ids)
-        
-        for child_id in internal.children_ids:
-            child = self._read_page(child_id)
-            child.parent_id = left_sibling.page_id
-            self._write_page(child_id, child)
-        
-        parent.children_ids.pop(internal_index)
+        left_sibling.child_node_ids.extend(internal.child_node_ids)
+
+        for child_id in internal.child_node_ids:
+            child = self._read_node(child_id)
+            child.parent_node_id = left_sibling.node_id
+            self._write_node(child_id, child)
+
+        parent.child_node_ids.pop(internal_index)
         parent.keys.pop(internal_index - 1)
-        
-        self._write_page(left_sibling.page_id, left_sibling)
-        self._write_page(parent.page_id, parent)
-        
-        if parent.page_id != self.root_page_id and parent.is_underflow(self.min_keys):
+
+        self._write_node(left_sibling.node_id, left_sibling)
+        self._write_node(parent.node_id, parent)
+        self._mark_node_as_deleted(internal.node_id)
+
+        if parent.node_id != self.root_node_id and parent.is_underflow(self.min_keys):
             self._handle_internal_underflow(parent)
 
-    def _merge_internal_with_right(self, internal: InternalNode, right_sibling: InternalNode, parent: InternalNode, internal_index: int):
+    def _merge_internal_with_right(self, internal: InternalNode, right_sibling: InternalNode,
+                                    parent: InternalNode, internal_index: int):
         separator_key = parent.keys[internal_index]
-        
+
         internal.keys.append(separator_key)
         internal.keys.extend(right_sibling.keys)
-        internal.children_ids.extend(right_sibling.children_ids)
-        
-        for child_id in right_sibling.children_ids:
-            child = self._read_page(child_id)
-            child.parent_id = internal.page_id
-            self._write_page(child_id, child)
-        
-        parent.children_ids.pop(internal_index + 1)
+        internal.child_node_ids.extend(right_sibling.child_node_ids)
+
+        for child_id in right_sibling.child_node_ids:
+            child = self._read_node(child_id)
+            child.parent_node_id = internal.node_id
+            self._write_node(child_id, child)
+
+        parent.child_node_ids.pop(internal_index + 1)
         parent.keys.pop(internal_index)
-        
-        self._write_page(internal.page_id, internal)
-        self._write_page(parent.page_id, parent)
-        
-        if parent.page_id != self.root_page_id and parent.is_underflow(self.min_keys):
+
+        self._write_node(internal.node_id, internal)
+        self._write_node(parent.node_id, parent)
+        self._mark_node_as_deleted(right_sibling.node_id)
+
+        if parent.node_id != self.root_node_id and parent.is_underflow(self.min_keys):
             self._handle_internal_underflow(parent)
 
     def drop_index(self):
@@ -662,9 +1034,100 @@ class BPlusTreeUnclusteredIndex:
         if os.path.exists(self.file_path):
             os.remove(self.file_path)
 
-        # Reiniciar metadata
-        self.next_page_id = 2
-        self.root_page_id = 1
+        self.root_node_id = self.FIRST_DATA_NODE_ID
+        self.next_available_node_id = self.FIRST_DATA_NODE_ID + 1
+        self._metadata_dirty = False
+        self.index_record_class = None
+        self.value_type_size = None
+        self.index_record_size = None
+        self.key_type = None
+        self.key_size = None
+        self.key_storage_size = None
 
-        # Reinicializar archivo
-        self._initialize_file()
+        self._initialize_new_tree()
+
+    def get_total_nodes(self) -> int:
+        if not os.path.exists(self.file_path):
+            return 0
+        return os.path.getsize(self.file_path) // self.NODE_SIZE if hasattr(self, 'NODE_SIZE') else 0
+
+    def get_file_info(self) -> dict:
+        if not os.path.exists(self.file_path):
+            return {"exists": False}
+
+        file_size = os.path.getsize(self.file_path)
+        
+        if not hasattr(self, 'NODE_SIZE') or self.NODE_SIZE is None:
+            return {
+                "exists": True,
+                "file_path": self.file_path,
+                "file_size_bytes": file_size,
+                "file_size_kb": file_size / 1024,
+                "status": "Not initialized"
+            }
+
+        total_nodes = file_size // self.NODE_SIZE
+
+        return {
+            "exists": True,
+            "file_path": self.file_path,
+            "file_size_bytes": file_size,
+            "file_size_kb": file_size / 1024,
+            "node_size_bytes": self.NODE_SIZE,
+            "internal_node_size": self.internal_node_size,
+            "leaf_node_size": self.leaf_node_size,
+            "index_record_size": self.index_record_size,
+            "total_nodes": total_nodes,
+            "allocated_nodes": self.next_available_node_id,
+            "utilization_ratio": f"{(self.next_available_node_id / total_nodes * 100):.1f}%" if total_nodes > 0 else "0%"
+        }
+
+    def get_tree_info(self) -> dict:
+        if not hasattr(self, 'NODE_SIZE') or self.NODE_SIZE is None:
+            return {
+                "order": self.order,
+                "max_keys_per_node": self.max_keys,
+                "min_keys_per_node": self.min_keys,
+                "root_node_id": self.root_node_id,
+                "next_available_node_id": self.next_available_node_id,
+                "index_column": self.index_column,
+                "status": "Not initialized"
+            }
+
+        return {
+            "order": self.order,
+            "max_keys_per_node": self.max_keys,
+            "min_keys_per_node": self.min_keys,
+            "root_node_id": self.root_node_id,
+            "next_available_node_id": self.next_available_node_id,
+            "index_column": self.index_column,
+            "key_type": self.key_type,
+            "key_storage_size": self.key_storage_size
+        }
+
+    def warm_up(self):
+        if self.NODE_SIZE is None or not os.path.exists(self.file_path):
+            return
+
+        try:
+            _ = self._read_node(self.root_node_id)
+
+            if self.key_type == "INT":
+                dummy_key = -999999
+            elif self.key_type == "FLOAT":
+                dummy_key = -999999.0
+            else:
+                dummy_key = "\x00"
+
+            try:
+                leaf = self._find_leaf_for_key(dummy_key)
+                if leaf:
+                    import bisect
+                    _ = bisect.bisect_left(leaf.keys, dummy_key)
+            except:
+                pass
+
+            from ..core.performance_tracker import PerformanceTracker
+            self.performance = PerformanceTracker()
+        except:
+            pass

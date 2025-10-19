@@ -56,19 +56,51 @@ class Bucket:
     def has_space(self):
         return self.num_records < BLOCK_FACTOR
 
-    def search(self, secondary_value, extendible_hash):
+    def search(self, secondary_value, extendible_hash, debug=False):
         matching_pks = []
-        for record in self.records:
-            normalized_value = extendible_hash._normalize_value(record.index_value)
-            if normalized_value == secondary_value:
+        # Normalizar el valor de búsqueda UNA VEZ
+        normalized_search = extendible_hash._normalize_value(secondary_value)
+        
+        if debug:
+            print(f"    [BUCKET DEBUG] Searching for: {repr(secondary_value)}")
+            print(f"    [BUCKET DEBUG] Normalized search: {repr(normalized_search)}")
+            print(f"    [BUCKET DEBUG] Bucket has {len(self.records)} records")
+        
+        for i, record in enumerate(self.records):
+            # Normalizar el valor del registro
+            normalized_record = extendible_hash._normalize_value(record.index_value)
+            
+            if debug:
+                print(f"    [BUCKET DEBUG] Record {i}: {repr(record.index_value)} -> {repr(normalized_record)} (match: {normalized_record == normalized_search})")
+            
+            if normalized_record == normalized_search:
                 matching_pks.append(record.primary_key)
+        
+        if debug:
+            print(f"    [BUCKET DEBUG] Found {len(matching_pks)} matches")
+        
         return matching_pks
 
-    def insert(self, index_record: IndexRecord, bucket_pos, bucketfile):
-        self.performance.start_operation()
+    def write_bucket(self, bucket_pos, bucketfile):
+        self.num_slots = len(self.records)
 
+        bucketfile.seek(bucket_pos)
+        bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, self.local_depth,
+                                     self.num_slots, self.num_records,
+                                     self.next_overflow_bucket))
+
+        tombstone = b'\x00' * self.index_record_size
+        for i in range(BLOCK_FACTOR):
+            if i < len(self.records):
+                bucketfile.write(self.records[i].pack())
+            else:
+                bucketfile.write(tombstone)
+
+        self.performance.track_write()
+
+    def insert(self, index_record: IndexRecord, bucket_pos, bucketfile):
         if self.is_full():
-            return self.performance.end_operation(False)
+            return False
 
         insert_position = None
         tombstone = b'\x00' * self.index_record_size
@@ -85,7 +117,7 @@ class Bucket:
                 insert_position = bucket_pos + Bucket.HEADER_SIZE + (self.num_slots * self.index_record_size)
                 self.num_slots += 1
             else:
-                return self.performance.end_operation(False)
+                return False
 
         bucketfile.seek(insert_position)
         bucketfile.write(index_record.pack())
@@ -98,20 +130,29 @@ class Bucket:
         bucketfile.write(struct.pack(Bucket.HEADER_FORMAT, self.local_depth, self.num_slots,
                                      self.num_records, self.next_overflow_bucket))
         self.performance.track_write()
-        return self.performance.end_operation(True)
+        return True
 
-    def delete(self, key, bucket_pos, bucketfile, pk=None):
-        self.performance.start_operation()
-
+    def delete(self, key, bucket_pos, bucketfile, pk=None, extendible_hash=None):
         tombstone = b'\x00' * self.index_record_size
         deleted_pks = []
+        
+        # Normalizar la key de búsqueda
+        if extendible_hash:
+            normalized_key = extendible_hash._normalize_value(key)
+        else:
+            normalized_key = key
 
         records_to_remove = []
         for i, record in enumerate(self.records):
-            stored_key = record.index_value
+            # Normalizar el valor almacenado
+            if extendible_hash:
+                stored_key = extendible_hash._normalize_value(record.index_value)
+            else:
+                stored_key = record.index_value
+            
             should_delete = False
 
-            if stored_key == key:
+            if stored_key == normalized_key:
                 if pk is None or record.primary_key == pk:
                     should_delete = True
 
@@ -140,7 +181,7 @@ class Bucket:
                                          self.next_overflow_bucket))
             self.performance.track_write()
 
-        return self.performance.end_operation(deleted_pks)
+        return deleted_pks
 
     def find_record_slot(self, target_record):
         tombstone = b'\x00' * self.index_record_size
@@ -176,16 +217,42 @@ class ExtendibleHashing:
 
         self.global_depth, self.first_free_bucket_pos = self._read_header()
 
+    def warm_up(self):
+    
+        temp_tracker = PerformanceTracker()
+        old_tracker = self.performance
+        self.performance = temp_tracker
+        
+        try:
+            with open(self.dirname, 'rb') as dirfile:
+                dirfile.read(self.HEADER_SIZE)
+                
+                dir_size = 2 ** self.global_depth
+                dirfile.read(dir_size * self.DIR_SIZE)
+            
+            with open(self.bucketname, 'rb') as bucketfile:
+                bucket_size = Bucket.HEADER_SIZE + (BLOCK_FACTOR * self.index_record_size)
+                for _ in range(min(10, 2 ** self.global_depth)):
+                    bucketfile.read(bucket_size)
+        except:
+            pass
+        finally:
+            self.performance = old_tracker
+
     def _hash_key(self, key):
-        if isinstance(key, str):
-            key = key.encode('utf-8')
-        elif not isinstance(key, bytes):
-            key = str(key).encode('utf-8')
-        return int(hashlib.md5(key).hexdigest(), 16)
+        normalized = self._normalize_value(key)
+        if isinstance(normalized, str):
+            normalized = normalized.encode('utf-8')
+        elif not isinstance(normalized, bytes):
+            normalized = str(normalized).encode('utf-8')
+        return int(hashlib.md5(normalized).hexdigest(), 16)
 
     def _normalize_value(self, value):
+        if value is None:
+            return ""
         if isinstance(value, bytes):
-            return value.decode('utf-8').strip('\x00').strip()
+            decoded = value.decode('utf-8', errors='ignore')
+            return decoded.strip('\x00').strip()
         else:
             return str(value).strip()
 
@@ -210,20 +277,26 @@ class ExtendibleHashing:
 
             current_pos = bucket_pos
             current_bucket = bucket
+            bucket_num = 0
             while current_bucket is not None:
-                matching_pk = matching_pk + current_bucket.search(secondary_value, self)
+                bucket_matches = current_bucket.search(secondary_value, self)
+                matching_pk.extend(bucket_matches)
 
                 if current_bucket.next_overflow_bucket != -1:
                     current_pos = current_bucket.next_overflow_bucket
                     current_bucket = Bucket.read_bucket(current_pos, bucketfile, self.index_record_template,
                                                         self.performance)
+                    bucket_num += 1
                 else:
                     break
-
             return self.performance.end_operation(matching_pk)
 
     def insert(self, index_record: IndexRecord):
         self.performance.start_operation()
+
+        if index_record.index_value is not None:
+            normalized = self._normalize_value(index_record.index_value)
+            index_record.index_value = normalized
 
         secondary_value = index_record.index_value
         if secondary_value is None:
@@ -238,14 +311,11 @@ class ExtendibleHashing:
 
         with open(self.dirname, 'r+b') as dirfile, open(self.bucketname, 'r+b') as bucketfile:
             bucket, bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
-            old_num_records = bucket.num_records
-            delete_result = bucket.delete(secondary_value, bucket_pos, bucketfile, primary_key)
-            deleted_pks = delete_result.data
+            deleted_pks = bucket.delete(secondary_value, bucket_pos, bucketfile, primary_key, self)
 
-            # Liberar bucket esta medio vacio
             if bucket.num_records <= MIN_N:
                 if bucket.next_overflow_bucket != -1:
-                        self._overflow_to_main_bucket(bucket, bucket_pos, dirfile, bucketfile)
+                    self._overflow_to_main_bucket(bucket, bucket_pos, dirfile, bucketfile)
                 elif bucket.num_records == 0:
                     self._handle_empty_bucket(bucket, bucket_pos, dirfile, bucketfile)
 
@@ -265,17 +335,16 @@ class ExtendibleHashing:
         return bucket, bucket_pos
 
     def _insert_index_record(self, index_record, dirfile, bucketfile):
-        secondary_value = self._normalize_value(index_record.index_value)
+        secondary_value = index_record.index_value
+        
         head_bucket, head_bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
         current_bucket = head_bucket
         current_bucket_pos = head_bucket_pos
         overflow_count = 0
 
-        # Intentar insertar en cadena de buckets existente
         while True:
             if current_bucket.has_space():
-                insert_result = current_bucket.insert(index_record, current_bucket_pos, bucketfile)
-                success = insert_result.data
+                success = current_bucket.insert(index_record, current_bucket_pos, bucketfile)
                 if success:
                     return True
 
@@ -292,12 +361,11 @@ class ExtendibleHashing:
             return self._split_bucket(head_bucket, head_bucket_pos, index_record, dirfile, bucketfile)
         else:
             if overflow_count < MAX_OVERFLOW:
-                overflow_bucket_result = self._append_new_bucket(head_bucket.local_depth, bucketfile)
-                overflow_bucket_pos = overflow_bucket_result.data
+                overflow_bucket_pos = self._append_new_bucket(head_bucket.local_depth, bucketfile)
                 self._add_overflow(current_bucket_pos, overflow_bucket_pos, bucketfile)
                 overflow_bucket = Bucket.read_bucket(overflow_bucket_pos, bucketfile, self.index_record_template,
                                                      self.performance)
-                insert_result = overflow_bucket.insert(index_record, overflow_bucket_pos, bucketfile)
+                overflow_bucket.insert(index_record, overflow_bucket_pos, bucketfile)
                 return True
             else:
                 self._double_directory(dirfile)
@@ -315,13 +383,12 @@ class ExtendibleHashing:
         for i in range(dir_size):
             dirfile.seek(header_offset + i * self.DIR_SIZE)
             pos = struct.unpack(self.DIR_FORMAT, dirfile.read(self.DIR_SIZE))[0]
-            self.performance.track_read()
             if pos == bucket_pos:
                 empty_index = i
                 break
 
         if empty_index is None:
-            return  # no directory entry found — nothing to redirect case for overflow!!
+            return
 
         mask = 1 << (empty_bucket.local_depth - 1)
         sibling_index = empty_index ^ mask
@@ -333,12 +400,10 @@ class ExtendibleHashing:
         for i in range(dir_size):
             dirfile.seek(header_offset + i * self.DIR_SIZE)
             pos = struct.unpack(self.DIR_FORMAT, dirfile.read(self.DIR_SIZE))[0]
-            self.performance.track_read()
 
             if pos == bucket_pos:
                 dirfile.seek(header_offset + i * self.DIR_SIZE)
                 dirfile.write(struct.pack(self.DIR_FORMAT, sibling_pos))
-                self.performance.track_write()
 
         if sibling_pos != bucket_pos:
             bucketfile.seek(sibling_pos)
@@ -370,8 +435,6 @@ class ExtendibleHashing:
         self._write_header()
 
     def _add_overflow(self, bucket_pos, overflow_bucket_pos, bucketfile):
-        self.performance.start_operation()
-
         bucket = Bucket.read_bucket(bucket_pos, bucketfile, self.index_record_template, self.performance)
         bucket.next_overflow_bucket = overflow_bucket_pos
         bucketfile.seek(bucket_pos)
@@ -380,11 +443,7 @@ class ExtendibleHashing:
                                      bucket.next_overflow_bucket))
         self.performance.track_write()
 
-        return self.performance.end_operation(True)
-
     def _append_new_bucket(self, local_depth, bucketfile):
-        self.performance.start_operation()
-
         # Reutilizar bucket de free list o crear nuevo
         if self.first_free_bucket_pos == -1:
             bucketfile.seek(0, 2)
@@ -405,7 +464,7 @@ class ExtendibleHashing:
         bucketfile.write(tombstone * BLOCK_FACTOR)
         self.performance.track_write()
 
-        return self.performance.end_operation(new_pos)
+        return new_pos
 
     def _split_bucket(self, head_bucket, head_bucket_pos, new_index_record, dirfile, bucketfile):
         if head_bucket.local_depth == self.global_depth:
@@ -434,12 +493,36 @@ class ExtendibleHashing:
         self.performance.track_write()
 
         # Crear nuevo bucket y redistribuir
-        new_bucket_result = self._append_new_bucket(new_local_depth, bucketfile)
-        new_bucket_pos = new_bucket_result.data
+        new_bucket_pos = self._append_new_bucket(new_local_depth, bucketfile)
         self._update_directory_pointers(head_bucket_pos, new_bucket_pos, new_local_depth, dirfile)
 
+        bucket_groups = {}
         for index_record in all_records_packed:
-            self._insert_index_record(index_record, dirfile, bucketfile)
+            secondary_value = index_record.index_value
+            hash_val = self._hash_key(secondary_value)
+            dir_index = hash_val % (2 ** self.global_depth)
+
+            dirfile.seek(self.HEADER_SIZE + dir_index * self.DIR_SIZE)
+            target_bucket_pos = struct.unpack(self.DIR_FORMAT, dirfile.read(self.DIR_SIZE))[0]
+            self.performance.track_read()
+
+            if target_bucket_pos not in bucket_groups:
+                bucket_groups[target_bucket_pos] = []
+            bucket_groups[target_bucket_pos].append(index_record)
+
+        for bucket_pos, records in bucket_groups.items():
+            bucket = Bucket.read_bucket(bucket_pos, bucketfile, self.index_record_template, self.performance)
+
+            for record in records:
+                if bucket.has_space():
+                    bucket.records.append(record)
+                    bucket.num_records += 1
+                else:
+                    if len(bucket.records) < BLOCK_FACTOR:
+                        bucket.records.append(record)
+                        bucket.num_records += 1
+
+            bucket.write_bucket(bucket_pos, bucketfile)
 
     def _get_all_records_from_bucket(self, bucket, bucket_pos, bucketfile):
         all_records = []
@@ -447,7 +530,7 @@ class ExtendibleHashing:
         current_pos = bucket_pos
 
         while current_bucket is not None:
-            all_records = all_records + current_bucket.records
+            all_records.extend(current_bucket.records)
 
             if current_bucket.next_overflow_bucket != -1:
                 current_pos = current_bucket.next_overflow_bucket
@@ -485,7 +568,6 @@ class ExtendibleHashing:
         for i in range(dir_size):
             dirfile.seek(header + i * entry_size)
             current_ptr = struct.unpack(self.DIR_FORMAT, dirfile.read(entry_size))[0]
-            self.performance.track_read()
 
             if current_ptr == old_bucket_pos:
                 # Extraer el bit que corresponde al nuevo nivel
@@ -493,7 +575,6 @@ class ExtendibleHashing:
                 if bit == 1:
                     dirfile.seek(header + i * entry_size)
                     dirfile.write(struct.pack(self.DIR_FORMAT, new_bucket_pos))
-                    self.performance.track_write()
 
     def _initialize_files(self, initial_depth=3):
         self.global_depth = initial_depth
@@ -511,7 +592,6 @@ class ExtendibleHashing:
             for i in range(2 ** self.global_depth):
                 bucket_pos = bucket0_pos if (i % 2 == 0) else bucket1_pos
                 dirfile.write(struct.pack(self.DIR_FORMAT, bucket_pos))
-                self.performance.track_write()
 
     def _append_new_bucket_init(self, bucketfile, local_depth):
         bucketfile.seek(0, 2)
@@ -543,8 +623,8 @@ class ExtendibleHashing:
 
             while next_bucket.num_records > 0:
                 for rec in next_bucket.records:
-                    delete_result = next_bucket.delete(rec.index_value, next_pos, bucketfile)
-                    insert_result = self.insert(rec)
+                    next_bucket.delete(rec.index_value, next_pos, bucketfile, extendible_hash=self)
+                    self.insert(rec)
 
                 if next_bucket.next_overflow_bucket != -1:
                     next_pos = next_bucket.next_overflow_bucket
@@ -558,7 +638,7 @@ class ExtendibleHashing:
                 temp_pos = next_pos
                 next_pos = next_bucket.next_overflow_bucket
                 if next_bucket.num_records == 0:
-                    self.free_bucket(temp_pos, bucketfile) #overflow dont need to redirect
+                    self.free_bucket(temp_pos, bucketfile)
                 next_bucket = Bucket.read_bucket(next_pos, bucketfile, self.index_record_template, self.performance)
 
             if curr.num_records == 0:

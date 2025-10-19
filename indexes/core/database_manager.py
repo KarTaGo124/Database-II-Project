@@ -56,6 +56,7 @@ class DatabaseManager:
 
         table_info["primary_index"] = primary_index
         self.tables[table_name] = table_info
+
         return True
 
     def create_index(self, table_name: str, field_name: str, index_type: str, scan_existing: bool = True):
@@ -87,12 +88,21 @@ class DatabaseManager:
             "type": index_type
         }
 
+        total_reads = 0
+        total_writes = 0
+        total_time = 0
+        records_indexed = 0
+
         if scan_existing:
             primary_index = table_info["primary_index"]
             if hasattr(primary_index, 'scan_all'):
                 try:
                     scan_result = primary_index.scan_all()
                     existing_records = scan_result.data
+
+                    total_reads += scan_result.disk_reads
+                    total_writes += scan_result.disk_writes
+                    total_time += scan_result.execution_time_ms
 
                     field_type, field_size = field_info
                     for record in existing_records:
@@ -102,14 +112,28 @@ class DatabaseManager:
                         index_record = IndexRecord(field_type, field_size)
                         index_record.set_index_data(secondary_value, primary_key)
 
-                        secondary_index.insert(index_record)
+                        insert_result = secondary_index.insert(index_record)
+
+                        total_reads += insert_result.disk_reads
+                        total_writes += insert_result.disk_writes
+                        total_time += insert_result.execution_time_ms
+                        records_indexed += 1
+
                 except Exception as e:
                     del table_info["secondary_indexes"][field_name]
                     if hasattr(secondary_index, 'drop_index'):
                         secondary_index.drop_index()
                     raise ValueError(f"Error indexing existing records: {e}")
 
-        return True
+        if hasattr(secondary_index, 'warm_up'):
+            secondary_index.warm_up()
+
+        return OperationResult(
+            data=f"Index created on {field_name} with {records_indexed} records indexed",
+            execution_time_ms=total_time,
+            disk_reads=total_reads,
+            disk_writes=total_writes
+        )
 
     def insert(self, table_name: str, record: Record):
         if table_name not in self.tables:
@@ -778,7 +802,8 @@ class DatabaseManager:
                 order=50,
                 key_column=table.key_field,
                 file_path=primary_filename,
-                record_class=Record
+                record_class=Record,
+                table=table
             )
 
 
@@ -794,7 +819,7 @@ class DatabaseManager:
             filename = os.path.join(secondary_dir, "btree_unclustered")
 
             return BPlusTreeUnclusteredIndex(
-                order=4,
+                order=50,
                 index_column=field_name,
                 file_path=filename
             )
@@ -870,3 +895,19 @@ class DatabaseManager:
         primary_index = table_info["primary_index"]
 
         return primary_index.scan_all()
+
+    def warm_up_indexes(self, table_name: str):
+        if table_name not in self.tables:
+            raise ValueError(f"Table {table_name} does not exist")
+
+        table_info = self.tables[table_name]
+        primary_index = table_info["primary_index"]
+
+        if hasattr(primary_index, 'warm_up'):
+            primary_index.warm_up()
+
+        for index_info in table_info["secondary_indexes"].values():
+            secondary_index = index_info["index"]
+            if hasattr(secondary_index, 'warm_up'):
+                secondary_index.warm_up()
+    
