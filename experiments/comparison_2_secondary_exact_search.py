@@ -18,6 +18,7 @@ from sql_parser.parser import parse
 from sql_parser.executor import Executor
 from experiments.csv_exporter import export_comparison_2
 import time
+import json
 
 def test_secondary_index(config_name, secondary_index_type=None):
     """Test with different secondary index configurations"""
@@ -105,10 +106,11 @@ def test_secondary_index(config_name, secondary_index_type=None):
     print(f"\n--- Exact Search Tests ---")
 
     # Test with various cities (should be unique)
-    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow"]
+    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow","Cairo"]
     search_reads = []
     search_times = []
     search_counts = []
+    search_results_data = {}  # Store actual results for consistency check
 
     for city in test_cities:
         search_sql = f'SELECT * FROM cities WHERE city = "{city}"'
@@ -118,13 +120,18 @@ def test_secondary_index(config_name, secondary_index_type=None):
         search_times.append(result.execution_time_ms)
         search_counts.append(len(result.data))
 
+        # Store results for consistency verification
+        # Sort by id to ensure consistent ordering
+        sorted_data = sorted(result.data, key=lambda x: x.get('id', 0) if isinstance(x, dict) else 0)
+        search_results_data[city] = sorted_data
+
     search_metrics = {
         'avg_reads': sum(search_reads) / len(search_reads),
         'avg_time_ms': sum(search_times) / len(search_times),
         'avg_results': sum(search_counts) / len(search_counts),
         'samples': len(test_cities)
     }
-    
+
     print(search_times)
     print(f"  Exact search by city (avg of {len(test_cities)} queries):")
     print(f"    Avg Reads: {search_metrics['avg_reads']:.2f}")
@@ -134,8 +141,132 @@ def test_secondary_index(config_name, secondary_index_type=None):
     return {
         'config': config_name,
         'insert': insert_metrics,
-        'search': search_metrics
+        'search': search_metrics,
+        'search_results': search_results_data,  # Include actual results
+        'test_cities': test_cities
     }
+
+def verify_consistency(all_results):
+    """
+    Verify that all index configurations return the same results for the same queries
+    Returns True if all results are consistent, False otherwise
+    """
+    print("\n" + "="*70)
+    print("CONSISTENCY VERIFICATION")
+    print("="*70)
+
+    if len(all_results) < 2:
+        print("  Not enough configurations to compare (need at least 2)")
+        return True
+
+    # Use first configuration as baseline
+    baseline = all_results[0]
+    baseline_name = baseline['config']
+    baseline_results = baseline['search_results']
+    test_cities = baseline['test_cities']
+
+    all_consistent = True
+    inconsistencies = []
+
+    print(f"\n  Baseline: {baseline_name}")
+    print(f"  Comparing against {len(all_results) - 1} other configuration(s)\n")
+
+    # Compare each configuration against baseline
+    for i, result in enumerate(all_results[1:], start=1):
+        config_name = result['config']
+        config_results = result['search_results']
+
+        print(f"  [{i}] Comparing: {config_name}")
+
+        config_consistent = True
+
+        # Compare results for each test city
+        for city in test_cities:
+            baseline_data = baseline_results.get(city, [])
+            config_data = config_results.get(city, [])
+
+            # Check if record counts match
+            if len(baseline_data) != len(config_data):
+                all_consistent = False
+                config_consistent = False
+                inconsistencies.append({
+                    'config': config_name,
+                    'city': city,
+                    'issue': 'Record count mismatch',
+                    'baseline_count': len(baseline_data),
+                    'config_count': len(config_data),
+                    'baseline_data': baseline_data,
+                    'config_data': config_data
+                })
+                continue
+
+            # Compare actual data (already sorted by id)
+            for idx, (baseline_record, config_record) in enumerate(zip(baseline_data, config_data)):
+                if baseline_record != config_record:
+                    all_consistent = False
+                    config_consistent = False
+                    inconsistencies.append({
+                        'config': config_name,
+                        'city': city,
+                        'issue': 'Record data mismatch',
+                        'record_index': idx,
+                        'baseline_record': baseline_record,
+                        'config_record': config_record
+                    })
+
+        if config_consistent:
+            print(f"      ✓ All results match baseline")
+        else:
+            print(f"      ✗ INCONSISTENCIES FOUND!")
+
+    # Print summary
+    print("\n" + "-"*70)
+    if all_consistent:
+        print("  RESULT: ✓ ALL CONFIGURATIONS RETURNED CONSISTENT RESULTS")
+        print("  All index implementations are working correctly!")
+    else:
+        print("  RESULT: ✗ INCONSISTENCIES DETECTED")
+        print(f"  Found {len(inconsistencies)} inconsistency(ies) across configurations")
+
+        # Print detailed debug information
+        print("\n" + "="*70)
+        print("DEBUG: INCONSISTENCY DETAILS")
+        print("="*70)
+
+        for i, inc in enumerate(inconsistencies, start=1):
+            print(f"\n  Inconsistency #{i}:")
+            print(f"    Configuration: {inc['config']}")
+            print(f"    Query City: {inc['city']}")
+            print(f"    Issue: {inc['issue']}")
+
+            if inc['issue'] == 'Record count mismatch':
+                print(f"    Baseline ({baseline_name}): {inc['baseline_count']} record(s)")
+                print(f"    {inc['config']}: {inc['config_count']} record(s)")
+                print(f"\n    Baseline data:")
+                print(f"      {json.dumps(inc['baseline_data'], indent=6)}")
+                print(f"    {inc['config']} data:")
+                print(f"      {json.dumps(inc['config_data'], indent=6)}")
+
+            elif inc['issue'] == 'Record data mismatch':
+                print(f"    Record index: {inc['record_index']}")
+                print(f"    Baseline record:")
+                print(f"      {json.dumps(inc['baseline_record'], indent=6)}")
+                print(f"    {inc['config']} record:")
+                print(f"      {json.dumps(inc['config_record'], indent=6)}")
+
+                # Show differences field by field
+                if isinstance(inc['baseline_record'], dict) and isinstance(inc['config_record'], dict):
+                    print(f"    Field-by-field comparison:")
+                    all_keys = set(inc['baseline_record'].keys()) | set(inc['config_record'].keys())
+                    for key in sorted(all_keys):
+                        baseline_val = inc['baseline_record'].get(key, '<MISSING>')
+                        config_val = inc['config_record'].get(key, '<MISSING>')
+                        if baseline_val != config_val:
+                            print(f"      {key}: {baseline_val} ≠ {config_val}")
+
+    print("="*70)
+
+    return all_consistent
 
 def main():
     print("\n" + "="*70)
@@ -161,6 +292,14 @@ def main():
     # Configuration 3: B+Tree Unclustered secondary index
     result_btree = test_secondary_index("B+Tree Unclustered Secondary Index", secondary_index_type="BTREE")
     all_results.append(result_btree)
+
+    # VERIFY CONSISTENCY ACROSS ALL CONFIGURATIONS
+    consistency_ok = verify_consistency(all_results)
+
+    if not consistency_ok:
+        print("\n" + "!"*70)
+        print("WARNING: Inconsistencies detected! Check debug output above.")
+        print("!"*70)
 
     # Print comparison summary
     print("\n" + "="*70)
