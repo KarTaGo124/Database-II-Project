@@ -299,6 +299,8 @@ class Executor:
                     cast_err += 1
                     continue
 
+        self.db.warm_up_indexes(plan.table)
+
         summary = f"CSV cargado: insertados={inserted}, duplicados={duplicates}, cast_err={cast_err}"
         return OperationResult(summary, total_time_ms, total_reads, total_writes)
 
@@ -475,8 +477,13 @@ class Executor:
             if not self.db._validate_secondary_index(plan.index_type.upper()):
                 return OperationResult(f"ERROR: Tipo de índice '{plan.index_type}' no soportado", 0, 0, 0)
 
-            self.db.create_index(plan.table, plan.column, plan.index_type.upper())
-            return OperationResult(f"OK: Índice creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}", 0, 0, 0)
+            result = self.db.create_index(plan.table, plan.column, plan.index_type.upper())
+            return OperationResult(
+                f"OK: Índice creado en {plan.table}.{plan.column} usando {plan.index_type.upper()}: {result.data}",
+                result.execution_time_ms,
+                result.disk_reads,
+                result.disk_writes
+            )
         except Exception as e:
             return OperationResult(f"ERROR: {e}", 0, 0, 0)
 
