@@ -83,9 +83,9 @@ def test_with_config(config_name, use_secondary_index=False):
 
     # CREATE SECONDARY INDEX if requested
     if use_secondary_index:
-        print(f"\nCreating B+Tree Unclustered index on 'country'...")
+        print(f"\nCreating B+Tree Unclustered index on 'population'...")
         create_index_sql = """
-        CREATE INDEX ON cities(country) USING BTREE
+        CREATE INDEX ON cities(population) USING BTREE
         """
 
         start_time = time.time()

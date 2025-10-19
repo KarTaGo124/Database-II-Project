@@ -126,7 +126,7 @@ class DatabaseManager:
                             skipped_duplicates += 1
 
                     if skipped_duplicates > 0:
-                        print(f"[DEBUG] Skipped {skipped_duplicates} duplicate records during index creation")
+                        print(f"Skipped {skipped_duplicates} duplicate records during index creation")
 
                 except Exception as e:
                     del table_info["secondary_indexes"][field_name]

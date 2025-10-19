@@ -61,20 +61,10 @@ class Bucket:
         # Normalizar el valor de búsqueda UNA VEZ
         normalized_search = extendible_hash._normalize_value(secondary_value)
         
-        if debug:
-            print(f"    [BUCKET DEBUG] Searching for: {repr(secondary_value)}")
-            print(f"    [BUCKET DEBUG] Normalized search: {repr(normalized_search)}")
-            print(f"    [BUCKET DEBUG] Bucket has {len(self.records)} records")
-        
+               
         for i, record in enumerate(self.records):
             # Normalizar el valor del registro
             normalized_record = extendible_hash._normalize_value(record.index_value)
-            
-            if debug:
-                try:
-                    print(f"    [BUCKET DEBUG] Record {i}: {repr(record.index_value)} -> {repr(normalized_record)} (match: {normalized_record == normalized_search})")
-                except UnicodeEncodeError:
-                    print(f"    [BUCKET DEBUG] Record {i}: <UnicodeEncodeError> (match: {normalized_record == normalized_search})")
             
             if normalized_record == normalized_search:
                 matching_pks.append(record.primary_key)
@@ -287,21 +277,12 @@ class ExtendibleHashing:
         self.performance.start_operation()
 
         if debug:
-            print(f"\n[HASH SEARCH DEBUG] Searching for: {repr(secondary_value)}")
             normalized = self._normalize_value(secondary_value)
-            print(f"[HASH SEARCH DEBUG] Normalized: {repr(normalized)}")
             hash_val = self._hash_key(secondary_value)
             dir_index = hash_val % (2 ** self.global_depth)
-            print(f"[HASH SEARCH DEBUG] Hash value: {hash_val}")
-            print(f"[HASH SEARCH DEBUG] Directory index: {dir_index}")
-            print(f"[HASH SEARCH DEBUG] Global depth: {self.global_depth}")
 
         with open(self.dirname, 'rb') as dirfile, open(self.bucketname, 'rb') as bucketfile:
             bucket, bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
-
-            if debug:
-                print(f"[HASH SEARCH DEBUG] Bucket position: {bucket_pos}")
-                print(f"[HASH SEARCH DEBUG] Bucket has {bucket.num_records} records")
 
             matching_pk = []
 
@@ -323,10 +304,7 @@ class ExtendibleHashing:
                 else:
                     break
 
-            if debug:
-                print(f"[HASH SEARCH DEBUG] Total matches found: {len(matching_pk)}")
-                print(f"[HASH SEARCH DEBUG] Matching PKs: {matching_pk}\n")
-
+            
             return self.performance.end_operation(matching_pk)
 
     def insert(self, index_record: IndexRecord, debug=False):
@@ -342,17 +320,10 @@ class ExtendibleHashing:
             # Convertir string a bytes (como hace Record._process_value para CHAR)
             index_record.index_value = index_record.index_value.encode('utf-8')[:self.index_record_template.value_type_size[0][2]]
 
-        if debug:
-            print(f"[HASH INSERT DEBUG] Original: {repr(secondary_value)}")
-            print(f"[HASH INSERT DEBUG] Stored as: {repr(index_record.index_value)}")
-            print(f"[HASH INSERT DEBUG] Normalized for hash: {repr(self._normalize_value(secondary_value))}")
-            print(f"[HASH INSERT DEBUG] Primary key: {index_record.primary_key}")
-
+      
         with open(self.dirname, 'r+b') as dirfile, open(self.bucketname, 'r+b') as bucketfile:
             # Pasar el valor original para calcular el hash correctamente
             result = self._insert_index_record(index_record, dirfile, bucketfile, debug=debug, original_value=secondary_value)
-            if debug:
-                print(f"[HASH INSERT DEBUG] Insert result: {result}")
             return self.performance.end_operation(True)
 
     def delete(self, secondary_value, primary_key=None):
@@ -389,13 +360,7 @@ class ExtendibleHashing:
 
         head_bucket, head_bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
 
-        if debug:
-            hash_val = self._hash_key(secondary_value)
-            dir_index = hash_val % (2 ** self.global_depth)
-            print(f"[HASH INSERT DEBUG] Hash value: {hash_val}")
-            print(f"[HASH INSERT DEBUG] Directory index: {dir_index}")
-            print(f"[HASH INSERT DEBUG] Bucket position: {head_bucket_pos}")
-
+    
         current_bucket = head_bucket
         current_bucket_pos = head_bucket_pos
         overflow_count = 0
@@ -403,11 +368,6 @@ class ExtendibleHashing:
         while True:
             if current_bucket.has_space():
                 success = current_bucket.insert(index_record, current_bucket_pos, bucketfile, extendible_hash=self)
-                if debug:
-                    if success:
-                        print(f"[HASH INSERT DEBUG] Successfully inserted in bucket at {current_bucket_pos}")
-                    else:
-                        print(f"[HASH INSERT DEBUG] Insert failed (duplicate found) in bucket at {current_bucket_pos}")
                 if success:
                     return True
 
