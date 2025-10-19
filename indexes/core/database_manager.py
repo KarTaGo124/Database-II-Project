@@ -18,10 +18,13 @@ class DatabaseManager:
         "RTREE": {"primary": False, "secondary": True}
     }
 
-    def __init__(self, database_name: str = None):
+    def __init__(self, database_name: str = None, base_path: str = None):
         self.tables = {}
         self.database_name = database_name or "default"
-        self.base_dir = os.path.join("data", "databases", self.database_name)
+        if base_path:
+            self.base_dir = os.path.join(base_path, self.database_name)
+        else:
+            self.base_dir = os.path.join("data", "databases", self.database_name)
         os.makedirs(self.base_dir, exist_ok=True)
 
     def create_table(self, table: Table, primary_index_type: str = "ISAM", csv_filename: str = None):
@@ -841,7 +844,7 @@ class DatabaseManager:
 
             return ExtendibleHashing(data_filename, field_name, field_type, field_size, is_primary=False)
         elif index_type == "RTREE":
-            secondary_dir = os.path.join(self.base_dir, "secondary")
+            secondary_dir = os.path.join(self.base_dir, table.table_name, f"secondary_rtree_{field_name}")
             os.makedirs(secondary_dir, exist_ok=True)
             
             if field_type != "ARRAY":
@@ -851,7 +854,7 @@ class DatabaseManager:
             
             table_info = self.tables[table.table_name]
             primary_index = table_info["primary_index"]
-            filename = os.path.join(secondary_dir, f"{table.table_name}_{field_name}_rtree")
+            filename = os.path.join(secondary_dir,f"{field_name}_rtree")
             
             from ..r_tree.r_tree import RTreeSecondaryIndex
             return RTreeSecondaryIndex(field_name, primary_index, filename, dimension=dimension)
