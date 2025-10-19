@@ -252,9 +252,11 @@ class BPlusTreeUnclusteredIndex:
     def _normalize_key(self, key: Any) -> Any:
         if self.key_type == "CHAR":
             if isinstance(key, bytes):
-                return key.decode('utf-8').rstrip('\x00').strip()
+                # Remove null padding and trailing whitespace for VARCHAR compatibility
+                return key.decode('utf-8').rstrip('\x00').rstrip()
             elif isinstance(key, str):
-                return key.rstrip('\x00').strip()
+                # Remove null padding and trailing whitespace for VARCHAR compatibility
+                return key.rstrip('\x00').rstrip()
         return key
 
     def _initialize_new_tree(self):
@@ -287,17 +289,34 @@ class BPlusTreeUnclusteredIndex:
                     return
 
                 version, root_id, next_id, order, record_size = struct.unpack('iiiii', metadata_bytes[4:24])
-                
+
                 self.root_node_id = root_id
                 self.next_available_node_id = next_id
                 self.index_record_size = record_size
-                
+
                 offset = 24
-                if offset + 4 > len(metadata_bytes):
+                if offset + 12 > len(metadata_bytes):
                     return
 
-                num_fields, = struct.unpack('i', metadata_bytes[offset:offset+4])
-                offset += 4
+                # Read enhanced metadata with key_type and key_size
+                num_fields, key_type_len = struct.unpack('ii', metadata_bytes[offset:offset+8])
+                offset += 8
+
+                # Read key_type if present
+                if key_type_len > 0:
+                    if offset + key_type_len + 4 > len(metadata_bytes):
+                        # Old format, fallback
+                        offset = 28
+                        num_fields = struct.unpack('i', metadata_bytes[24:28])[0]
+                    else:
+                        self.key_type = metadata_bytes[offset:offset+key_type_len].decode('utf-8')
+                        offset += key_type_len
+                        self.key_size, = struct.unpack('i', metadata_bytes[offset:offset+4])
+                        offset += 4
+                else:
+                    # Old format without key_type in metadata
+                    offset = 28
+                    num_fields = struct.unpack('i', metadata_bytes[24:28])[0]
 
                 self.value_type_size = []
                 for i in range(num_fields):
@@ -334,13 +353,15 @@ class BPlusTreeUnclusteredIndex:
                     self.value_type_size.append((field_name, field_type, field_size))
                 
                 self.index_record_class = IndexRecord
-                
-                for field_name, field_type, field_size in self.value_type_size:
-                    if field_name == "index_value":
-                        self.key_type = field_type
-                        self.key_size = field_size
-                        break
-                
+
+                # If key_type wasn't loaded from enhanced metadata, extract from value_type_size
+                if self.key_type is None:
+                    for field_name, field_type, field_size in self.value_type_size:
+                        if field_name == "index_value":
+                            self.key_type = field_type
+                            self.key_size = field_size
+                            break
+
                 self._calculate_node_sizes()
 
         except Exception as e:
@@ -356,21 +377,29 @@ class BPlusTreeUnclusteredIndex:
 
         try:
             metadata_parts = []
-            
-            metadata_parts.append(struct.pack('4siiii', 
+
+            # Pack main metadata including key type info
+            metadata_parts.append(struct.pack('4siiii',
                 b'BPT+', 1, self.root_node_id, self.next_available_node_id, self.order
             ))
-            
-            metadata_parts.append(struct.pack('ii', self.index_record_size, len(self.value_type_size)))
-            
+
+            # Add key_type and key_size for better metadata completeness
+            key_type_bytes = self.key_type.encode('utf-8') if self.key_type else b''
+            metadata_parts.append(struct.pack('iii',
+                self.index_record_size, len(self.value_type_size), len(key_type_bytes)
+            ))
+            if key_type_bytes:
+                metadata_parts.append(key_type_bytes)
+            metadata_parts.append(struct.pack('i', self.key_size if self.key_size else 0))
+
             for field_name, field_type, field_size in self.value_type_size:
                 name_bytes = field_name.encode('utf-8')
                 type_bytes = field_type.encode('utf-8')
-                
+
                 metadata_parts.append(struct.pack('iii', len(name_bytes), len(type_bytes), field_size))
                 metadata_parts.append(name_bytes)
                 metadata_parts.append(type_bytes)
-            
+
             metadata_bytes = b''.join(metadata_parts)
 
             if len(metadata_bytes) > self.NODE_SIZE:
@@ -525,27 +554,30 @@ class BPlusTreeUnclusteredIndex:
         primary_keys = []
         pos = bisect.bisect_left(leaf.keys, key)
 
-        # Navigate through leaf nodes to find ALL instances of the key
+        # Navigate through leaf nodes to find ALL instances of the key (secondary index support)
         while leaf is not None:
-            # Search in current leaf
+            # Search in current leaf starting from pos
             while pos < len(leaf.keys) and leaf.keys[pos] == key:
                 primary_keys.append(leaf.index_records[pos].primary_key)
                 pos += 1
 
-            # If we've moved past the key or reached end of leaf, check next leaf
-            if pos >= len(leaf.keys) or leaf.keys[pos] > key:
+            # Check if we need to continue to next leaf
+            if pos >= len(leaf.keys):
+                # Reached end of leaf, check next leaf for more instances
                 if leaf.next_leaf_id is not None:
                     leaf = self._read_node(leaf.next_leaf_id)
+                    if leaf is None:
+                        break
                     pos = 0
-                    # Check if next leaf starts with our key
-                    if leaf and len(leaf.keys) > 0 and leaf.keys[0] == key:
-                        continue  # Keep searching in next leaf
-                    else:
-                        break  # No more instances of this key
+                    # Continue loop to check if next leaf has our key
                 else:
                     break  # No more leaves
+            elif leaf.keys[pos] > key:
+                # Found a key greater than search_key, we're done
+                break
             else:
-                break  # Found a key > search_key, so we're done
+                # This shouldn't happen (pos < len and key[pos] <= key but not ==)
+                break
 
         return self.performance.end_operation(primary_keys)
     
@@ -557,10 +589,9 @@ class BPlusTreeUnclusteredIndex:
                 self._initialize_index_record_info(index_record)
                 root = LeafNode()
                 root.node_id = self.FIRST_DATA_NODE_ID
-                root.parent_node_id = None
-                root.prev_leaf_id = None
-                root.next_leaf_id = None
+                # FALTA: Asignar el root correctamente
                 self._write_node(self.FIRST_DATA_NODE_ID, root)
+                self._persist_metadata()
 
             key = self._normalize_key(index_record.index_value)
             success = self._insert_into_tree(self.root_node_id, key, index_record)
@@ -584,44 +615,100 @@ class BPlusTreeUnclusteredIndex:
             return self.performance.end_operation(result)
 
     def _delete_by_keys(self, secondary_key: Any, primary_key: Any) -> bool:
+        # For secondary index: need to search across multiple leaves with same secondary_key
         leaf = self._find_leaf_for_key(secondary_key)
-        
-        for i in range(len(leaf.keys)):
-            if leaf.keys[i] == secondary_key and leaf.index_records[i].primary_key == primary_key:
-                leaf.keys.pop(i)
-                leaf.index_records.pop(i)
+        if leaf is None:
+            return False
+
+        pos = bisect.bisect_left(leaf.keys, secondary_key)
+
+        # Search through all leaves that might contain this secondary_key
+        while leaf is not None:
+            # Search in current leaf starting from pos
+            while pos < len(leaf.keys) and leaf.keys[pos] == secondary_key:
+                if leaf.index_records[pos].primary_key == primary_key:
+                    # Found the exact record to delete
+                    leaf.keys.pop(pos)
+                    leaf.index_records.pop(pos)
+                    self._write_node(leaf.node_id, leaf)
+
+                    if leaf.node_id != self.root_node_id and leaf.is_underflow(self.min_keys):
+                        self._handle_leaf_underflow(leaf)
+
+                    self._reduce_tree_height_if_needed()
+                    self._flush_metadata_if_needed()
+
+                    return True
+                pos += 1
+
+            # Check if we need to continue to next leaf
+            if pos >= len(leaf.keys):
+                # Reached end of leaf, check next leaf
+                if leaf.next_leaf_id is not None:
+                    leaf = self._read_node(leaf.next_leaf_id)
+                    if leaf is None:
+                        break
+                    pos = 0
+                else:
+                    break
+            elif leaf.keys[pos] > secondary_key:
+                # Found a key greater than secondary_key, we're done
+                break
+            else:
+                break
+
+        return False
+
+    def _delete_all_by_secondary_key(self, secondary_key: Any) -> List[Any]:
+        # For secondary index: delete ALL records with this secondary_key across multiple leaves
+        leaf = self._find_leaf_for_key(secondary_key)
+        if leaf is None:
+            return []
+
+        deleted_pks = []
+        pos = bisect.bisect_left(leaf.keys, secondary_key)
+
+        # Process all leaves that might contain this secondary_key
+        while leaf is not None:
+            indices_to_delete = []
+
+            # Find all instances in current leaf
+            i = pos
+            while i < len(leaf.keys) and leaf.keys[i] == secondary_key:
+                indices_to_delete.append(i)
+                deleted_pks.append(leaf.index_records[i].primary_key)
+                i += 1
+
+            # Delete in reverse order to maintain indices
+            for idx in reversed(indices_to_delete):
+                leaf.keys.pop(idx)
+                leaf.index_records.pop(idx)
+
+            # Write the modified leaf
+            if indices_to_delete:
                 self._write_node(leaf.node_id, leaf)
 
                 if leaf.node_id != self.root_node_id and leaf.is_underflow(self.min_keys):
                     self._handle_leaf_underflow(leaf)
 
-                self._reduce_tree_height_if_needed()
-                self._flush_metadata_if_needed()
+            # Check if we need to continue to next leaf
+            if i >= len(leaf.keys):
+                # Reached end of leaf, check next leaf
+                if leaf.next_leaf_id is not None:
+                    next_leaf = self._read_node(leaf.next_leaf_id)
+                    if next_leaf is None or len(next_leaf.keys) == 0 or next_leaf.keys[0] > secondary_key:
+                        break
+                    leaf = next_leaf
+                    pos = 0
+                else:
+                    break
+            elif len(leaf.keys) > 0 and leaf.keys[0] > secondary_key:
+                # All remaining keys are greater, we're done
+                break
+            else:
+                break
 
-                return True
-
-        return False
-
-    def _delete_all_by_secondary_key(self, secondary_key: Any) -> List[Any]:
-        leaf = self._find_leaf_for_key(secondary_key)
-        deleted_pks = []
-
-        indices_to_delete = []
-        for i in range(len(leaf.keys)):
-            if leaf.keys[i] == secondary_key:
-                indices_to_delete.append(i)
-                deleted_pks.append(leaf.index_records[i].primary_key)
-
-        for i in reversed(indices_to_delete):
-            leaf.keys.pop(i)
-            leaf.index_records.pop(i)
-
-        if indices_to_delete:
-            self._write_node(leaf.node_id, leaf)
-
-            if leaf.node_id != self.root_node_id and leaf.is_underflow(self.min_keys):
-                self._handle_leaf_underflow(leaf)
-
+        if deleted_pks:
             self._reduce_tree_height_if_needed()
             self._flush_metadata_if_needed()
 
@@ -629,36 +716,76 @@ class BPlusTreeUnclusteredIndex:
 
     def range_search(self, start_key: Any, end_key: Any) -> OperationResult:
         self.performance.start_operation()
-        
+
         if self.NODE_SIZE is None:
             return self.performance.end_operation([])
-        
-        start_key = self._normalize_key(start_key)
-        end_key = self._normalize_key(end_key)
+
+        start_key_normalized = self._normalize_key(start_key)
+        end_key_normalized = self._normalize_key(end_key)
 
         results = []
-        leaf = self._find_leaf_for_key(start_key)
-        
+
+        # Estrategia simple pero efectiva: empezar desde el inicio posible
+        # y recolectar hasta encontrar el final
+        leaf = self._find_start_leaf_for_range(start_key_normalized)
         if leaf is None:
             return self.performance.end_operation([])
 
-        pos = bisect.bisect_left(leaf.keys, start_key)
-
+        scanning = False
+        
         while leaf is not None:
-            for i in range(pos, len(leaf.keys)):
-                if leaf.keys[i] > end_key:
+            for i in range(len(leaf.keys)):
+                stored_key_normalized = self._normalize_key(leaf.keys[i])
+
+                # Verificar si hemos llegado al inicio del rango
+                if not scanning:
+                    if stored_key_normalized >= start_key_normalized:
+                        scanning = True
+                    else:
+                        continue  # Seguir buscando el inicio
+
+                # Verificar si hemos pasado el final del rango
+                if stored_key_normalized > end_key_normalized:
                     return self.performance.end_operation(results)
-                if leaf.keys[i] >= start_key:
+
+                # Agregar clave al resultado
+                if scanning and stored_key_normalized <= end_key_normalized:
                     results.append(leaf.index_records[i].primary_key)
 
+            # Mover a la siguiente hoja
             if leaf.next_leaf_id is not None:
                 leaf = self._read_node(leaf.next_leaf_id)
-                pos = 0
             else:
                 break
 
         return self.performance.end_operation(results)
 
+    def _find_start_leaf_for_range(self, start_key: Any) -> Optional[LeafNode]:
+        """
+        Encuentra la hoja donde podría comenzar el rango.
+        Para duplicados, esto garantiza que encontramos la primera ocurrencia.
+        """
+        # Primero encontrar una hoja que contenga la clave
+        leaf = self._find_leaf_for_key(start_key)
+        if leaf is None:
+            return None
+
+        # Retroceder hasta la primera hoja que podría contener start_key
+        # o una clave menor (para cubrir todos los casos)
+        while leaf.prev_leaf_id is not None:
+            prev_leaf = self._read_node(leaf.prev_leaf_id)
+            if prev_leaf is None or not prev_leaf.keys:
+                break
+                
+            # Si la última clave de la hoja anterior es >= start_key,
+            # entonces podría contener duplicados que necesitamos incluir
+            last_key_prev = self._normalize_key(prev_leaf.keys[-1])
+            if last_key_prev >= start_key:
+                leaf = prev_leaf
+            else:
+                break
+
+        return leaf
     def _find_leaf_for_key(self, key: Any) -> Optional[LeafNode]:
         if self.NODE_SIZE is None:
             return None
@@ -686,7 +813,16 @@ class BPlusTreeUnclusteredIndex:
             return self._insert_into_internal(node, key, index_record)
 
     def _insert_into_leaf(self, leaf: LeafNode, key: Any, index_record: IndexRecord) -> bool:
-        pos = bisect.bisect_right(leaf.keys, key)
+        pos = 0
+        while pos < len(leaf.keys):
+            if leaf.keys[pos] > key:
+                break
+            elif leaf.keys[pos] == key:
+                if leaf.index_records[pos].primary_key == index_record.primary_key:
+                    return False  # Duplicado exacto
+                elif leaf.index_records[pos].primary_key > index_record.primary_key:
+                    break
+            pos += 1
 
         leaf.keys.insert(pos, key)
         leaf.index_records.insert(pos, index_record)
@@ -694,7 +830,7 @@ class BPlusTreeUnclusteredIndex:
 
         if leaf.is_full(self.max_keys):
             self._split_leaf_node(leaf)
-
+        
         return True
 
     def _insert_into_internal(self, internal: InternalNode, key: Any, index_record: IndexRecord) -> bool:
@@ -703,13 +839,28 @@ class BPlusTreeUnclusteredIndex:
         return self._insert_into_tree(child_id, key, index_record)
 
     def _split_leaf_node(self, leaf: LeafNode):
-
         new_leaf = LeafNode()
         new_leaf.node_id = self._allocate_node_id()
         new_leaf.parent_node_id = leaf.parent_node_id
 
-
         mid = len(leaf.keys) // 2
+        
+        # Verificar que no violamos min_keys
+        if mid < self.min_keys:
+            mid = self.min_keys
+        elif len(leaf.keys) - mid < self.min_keys:
+            mid = len(leaf.keys) - self.min_keys
+        
+        # Para índices secundarios, intentar mantener claves duplicadas juntas
+        split_key = leaf.keys[mid]
+        
+        # Buscar el final del grupo de duplicados sin exceder los límites
+        while mid < len(leaf.keys) - 1 and leaf.keys[mid] == split_key:
+            if len(leaf.keys) - (mid + 1) >= self.min_keys:
+                mid += 1
+            else:
+                break
+
         new_leaf.keys = leaf.keys[mid:]
         new_leaf.index_records = leaf.index_records[mid:]
 
@@ -719,8 +870,9 @@ class BPlusTreeUnclusteredIndex:
 
         if new_leaf.next_leaf_id is not None:
             next_leaf = self._read_node(new_leaf.next_leaf_id)
-            next_leaf.prev_leaf_id = new_leaf.node_id
-            self._write_node(next_leaf.node_id, next_leaf)
+            if next_leaf: 
+                next_leaf.prev_leaf_id = new_leaf.node_id
+                self._write_node(next_leaf.node_id, next_leaf)
 
         leaf.keys = leaf.keys[:mid]
         leaf.index_records = leaf.index_records[:mid]
@@ -730,6 +882,7 @@ class BPlusTreeUnclusteredIndex:
 
         promote_key = new_leaf.keys[0]
         self._promote_key_to_parent(leaf, promote_key, new_leaf.node_id)
+        
 
     def _split_internal_node(self, internal: InternalNode):
         new_internal = InternalNode()
@@ -745,15 +898,86 @@ class BPlusTreeUnclusteredIndex:
         internal.keys = internal.keys[:mid]
         internal.child_node_ids = internal.child_node_ids[:mid + 1]
 
+        # Update parent pointers for children
         for child_id in new_internal.child_node_ids:
             child = self._read_node(child_id)
             child.parent_node_id = new_internal.node_id
             self._write_node(child_id, child)
 
+        for child_id in internal.child_node_ids:
+            child = self._read_node(child_id)
+            child.parent_node_id = internal.node_id
+            self._write_node(child_id, child)
+
         self._write_node(internal.node_id, internal)
         self._write_node(new_internal.node_id, new_internal)
 
+        # NOTE: Leaf chain will be rebuilt in warm_up() after all insertions complete
+
         self._promote_key_to_parent(internal, promote_key, new_internal.node_id)
+
+    def _find_rightmost_leaf_in_subtree(self, node_id: int) -> Optional[LeafNode]:
+        """Find the rightmost (last) leaf in a subtree."""
+        node = self._read_node(node_id)
+
+        # Navigate down the rightmost path
+        while isinstance(node, InternalNode):
+            node = self._read_node(node.child_node_ids[-1])
+
+        return node
+
+    def _find_leftmost_leaf_in_subtree(self, node_id: int) -> Optional[LeafNode]:
+        """Find the leftmost (first) leaf in a subtree."""
+        node = self._read_node(node_id)
+
+        # Navigate down the leftmost path
+        while isinstance(node, InternalNode):
+            node = self._read_node(node.child_node_ids[0])
+
+        return node
+
+    def _rebuild_entire_leaf_chain(self):
+        if self.NODE_SIZE is None:
+            return
+
+        # Colectar todas las hojas recorriendo el árbol en orden
+        all_leaves = []
+        self._collect_leaves_in_order(self.root_node_id, all_leaves)
+        
+        # Verificar que el orden sea correcto
+        for i in range(len(all_leaves) - 1):
+            current_leaf = all_leaves[i]
+            next_leaf = all_leaves[i + 1]
+            
+            if current_leaf.keys and next_leaf.keys:
+                last_key_current = self._normalize_key(current_leaf.keys[-1])
+                first_key_next = self._normalize_key(next_leaf.keys[0])
+                
+                if last_key_current > first_key_next:
+                    # El orden está incorrecto, necesitamos reordenar
+                    all_leaves.sort(key=lambda leaf: self._normalize_key(leaf.keys[0]) if leaf.keys else "")
+                    break
+
+        # Reconstruir la cadena
+        for i in range(len(all_leaves)):
+            leaf = all_leaves[i]
+            leaf.prev_leaf_id = all_leaves[i - 1].node_id if i > 0 else None
+            leaf.next_leaf_id = all_leaves[i + 1].node_id if i < len(all_leaves) - 1 else None
+            self._write_node(leaf.node_id, leaf)
+        
+    def _collect_leaves_in_order(self, node_id: int, leaves_list: list):
+        """
+        Recursively collect all leaves in sorted order by traversing the tree.
+        """
+        node = self._read_node(node_id)
+
+        if isinstance(node, InternalNode):
+            # Traverse children in order
+            for child_id in node.child_node_ids:
+                self._collect_leaves_in_order(child_id, leaves_list)
+        else:
+            # It's a leaf, add it to the list
+            leaves_list.append(node)
 
     def _promote_key_to_parent(self, left_child: Node, key: Any, right_child_id: int):
         if left_child.parent_node_id is None:
@@ -876,8 +1100,9 @@ class BPlusTreeUnclusteredIndex:
         left_sibling.next_leaf_id = leaf.next_leaf_id
         if leaf.next_leaf_id is not None:
             next_leaf = self._read_node(leaf.next_leaf_id)
-            next_leaf.prev_leaf_id = left_sibling.node_id
-            self._write_node(next_leaf.node_id, next_leaf)
+            if next_leaf:
+                next_leaf.prev_leaf_id = left_sibling.node_id
+                self._write_node(next_leaf.node_id, next_leaf)
 
         parent.child_node_ids.pop(leaf_index)
         parent.keys.pop(leaf_index - 1)
@@ -897,8 +1122,9 @@ class BPlusTreeUnclusteredIndex:
         leaf.next_leaf_id = right_sibling.next_leaf_id
         if right_sibling.next_leaf_id is not None:
             next_leaf = self._read_node(right_sibling.next_leaf_id)
-            next_leaf.prev_leaf_id = leaf.node_id
-            self._write_node(next_leaf.node_id, next_leaf)
+            if next_leaf:
+                next_leaf.prev_leaf_id = leaf.node_id
+                self._write_node(next_leaf.node_id, next_leaf)
 
         parent.child_node_ids.pop(leaf_index + 1)
         parent.keys.pop(leaf_index)
@@ -1110,6 +1336,12 @@ class BPlusTreeUnclusteredIndex:
             return
 
         try:
+            # CRITICAL FIX: Rebuild the leaf chain after bulk insertions
+            # During bulk inserts, internal node splits can corrupt the leaf chain
+            # We rebuild it here to ensure proper ordering
+            self._rebuild_entire_leaf_chain()
+
+            # Pre-load root node for performance
             _ = self._read_node(self.root_node_id)
 
             if self.key_type == "INT":

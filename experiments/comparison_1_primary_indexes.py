@@ -2,7 +2,7 @@
 COMPARISON 1: Primary Indexes Performance
 ==========================================
 Compares: Sequential vs ISAM vs B+Tree Clustered
-Dataset: World Cities (1K records by default, change to worldcities.csv for full 41K)
+Dataset: World Cities (10k records by default, change to worldcities.csv for full 10k)
 Operations: Insert, Search by id, Range Search by id
 """
 
@@ -24,7 +24,14 @@ def test_primary_index(index_type, index_name):
     print(f"{'='*70}")
 
     # Create unique database for this test
-    db_manager = DatabaseManager(f"comp1_{index_type.lower()}_db")
+    db_name = f"comp1_{index_type.lower()}_db"
+
+    # Clean up previous test data if it exists
+    import shutil
+    if os.path.exists(db_name):
+        shutil.rmtree(db_name)
+
+    db_manager = DatabaseManager(db_name)
     executor = Executor(db_manager)
 
     # CREATE TABLE using SQL
@@ -103,6 +110,12 @@ def test_primary_index(index_type, index_name):
         search_times.append(result.execution_time_ms)
         search_counts.append(len(result.data))
 
+        # Print records found
+        if result.data:
+            print(f"    ID {test_id}: Found {len(result.data)} record(s)")
+            for rec in result.data[:1]:  # Show first record only
+                print(f"      {rec}")
+
     results['search'] = {
         'avg_reads': sum(search_reads) / len(search_reads),
         'avg_time_ms': sum(search_times) / len(search_times),
@@ -135,6 +148,12 @@ def test_primary_index(index_type, index_name):
         range_times.append(result.execution_time_ms)
         range_counts.append(len(result.data))
 
+        # Print sample of records found
+        print(f"    Range [{start_id}, {end_id}]: Found {len(result.data)} record(s)")
+        if result.data:
+            for rec in result.data[:2]:  # Show first 2 records
+                print(f"      {rec}")
+
     results['range_search'] = {
         'avg_reads': sum(range_reads) / len(range_reads),
         'avg_time_ms': sum(range_times) / len(range_times),
@@ -154,7 +173,7 @@ def main():
     print("\n" + "="*70)
     print("COMPARISON 1: PRIMARY INDEXES PERFORMANCE")
     print("="*70)
-    print("Dataset: World Cities (1K records)")
+    print("Dataset: World Cities (10k records)")
     print("Comparing: Sequential vs ISAM vs B+Tree Clustered")
     print("Using SQL Parser & Executor")
     print("="*70)

@@ -2,7 +2,7 @@
 COMPARISON 2: Secondary Indexes for Exact Search
 =================================================
 Compares: Hash vs B+Tree Unclustered for exact search queries
-Dataset: World Cities (1K records by default, change to worldcities.csv for full 41K)
+Dataset: World Cities (1k records by default, change to worldcities.csv for full 41k)
 Base: B+Tree Clustered (primary: id)
 Secondary field: city (unique keys for better hash distribution)
 Operations: Insert overhead, Exact search by city
@@ -27,6 +27,15 @@ def test_secondary_index(config_name, secondary_index_type=None):
 
     # Create unique database
     db_name = f"comp2_{config_name.replace(' ', '_').replace('+', '').lower()}_db"
+
+    # Clean up previous test data if it exists
+    import shutil
+    # DatabaseManager creates databases in ./data/databases/
+    db_path = os.path.join("data", "databases", db_name)
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+        print(f"  [CLEANUP] Removed existing database at {db_path}")
+
     db_manager = DatabaseManager(db_name)
     executor = Executor(db_manager)
 
@@ -51,7 +60,7 @@ def test_secondary_index(config_name, secondary_index_type=None):
     # LOAD DATA
     print(f"\nLoading data...")
     load_sql = """
-    LOAD DATA FROM FILE "data/datasets/worldcities_10k.csv"
+    LOAD DATA FROM FILE "data/datasets/worldcities_1k.csv"
     INTO cities
     """
 
@@ -105,12 +114,24 @@ def test_secondary_index(config_name, secondary_index_type=None):
     print(f"\n--- Exact Search Tests ---")
 
     # Test with various cities (should be unique)
-    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow"]
+    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow", "Cairo","Tampa"]
     search_reads = []
     search_times = []
     search_counts = []
+    search_results_details = {}  # Store actual results for verification
 
     for city in test_cities:
+        # Special debug for Hash + Cairo
+        if secondary_index_type == "HASH" and city == "Cairo":
+            print(f"\n    [DEBUG] Testing Cairo with Hash index...")
+            table_info = db_manager.tables[  'cities']
+            if 'city' in table_info['secondary_indexes']:
+                hash_idx = table_info['secondary_indexes']['city']['index']
+                print(f"    [DEBUG] Hash index global_depth: {hash_idx.global_depth}")
+                # Test direct search
+                direct_result = hash_idx.search(city)
+                print(f"    [DEBUG] Direct hash_idx.search('{city}'): {direct_result.data}")
+
         search_sql = f'SELECT * FROM cities WHERE city = "{city}"'
         plans = parse(search_sql)
         result = executor.execute(plans[0])
@@ -118,15 +139,31 @@ def test_secondary_index(config_name, secondary_index_type=None):
         search_times.append(result.execution_time_ms)
         search_counts.append(len(result.data))
 
+        # Store results for verification
+        search_results_details[city] = {
+            'count': len(result.data),
+            'records': result.data[:1] if result.data else []  # Store first record
+        }
+
+        # Print what was found
+        if result.data:
+            print(f"    {city}: Found {len(result.data)} record(s) - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+            for rec in result.data[:1]:  # Show first record
+                print(f"      -> {rec}")
+        else:
+            print(f"    {city}: NOT FOUND - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+            # Extra debug for failures with Hash
+            if secondary_index_type == "HASH":
+                print(f"    [DEBUG] Hash search failed for '{city}'")
+
     search_metrics = {
         'avg_reads': sum(search_reads) / len(search_reads),
         'avg_time_ms': sum(search_times) / len(search_times),
         'avg_results': sum(search_counts) / len(search_counts),
         'samples': len(test_cities)
     }
-    
-    print(search_times)
-    print(f"  Exact search by city (avg of {len(test_cities)} queries):")
+
+    print(f"\n  Summary - Exact search by city (avg of {len(test_cities)} queries):")
     print(f"    Avg Reads: {search_metrics['avg_reads']:.2f}")
     print(f"    Avg Time: {search_metrics['avg_time_ms']:.2f}ms")
     print(f"    Avg Results: {search_metrics['avg_results']:.1f} records")
@@ -134,14 +171,15 @@ def test_secondary_index(config_name, secondary_index_type=None):
     return {
         'config': config_name,
         'insert': insert_metrics,
-        'search': search_metrics
+        'search': search_metrics,
+        'search_details': search_results_details  # Include for verification
     }
 
 def main():
     print("\n" + "="*70)
     print("COMPARISON 2: SECONDARY INDEXES FOR EXACT SEARCH")
     print("="*70)
-    print("Dataset: World Cities (1K records)")
+    print("Dataset: World Cities (1k records)")
     print("Base: B+Tree Clustered (primary: id)")
     print("Comparing: No index vs Hash vs B+Tree Unclustered")
     print("Field: city (VARCHAR) - unique keys")
@@ -181,6 +219,28 @@ def main():
     for res in all_results:
         srch = res['search']
         print(f"  {res['config']:<35} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:<15.2f} {srch['avg_results']:.1f}")
+
+    # VERIFICATION: Check consistency across all configurations
+    print("\n--- CONSISTENCY VERIFICATION ---")
+    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow", "Cairo","Tampa"]
+    all_consistent = True
+
+    for city in test_cities:
+        no_idx_count = all_results[0]['search_details'][city]['count']
+        hash_count = all_results[1]['search_details'][city]['count']
+        btree_count = all_results[2]['search_details'][city]['count']
+
+        if no_idx_count == hash_count == btree_count:
+            status = "[OK]" if no_idx_count > 0 else "[OK] (not found)"
+            print(f"  {city:<15}: {status} - All configs found {no_idx_count} record(s)")
+        else:
+            all_consistent = False
+            print(f"  {city:<15}: [INCONSISTENT] - No Index: {no_idx_count}, Hash: {hash_count}, B+Tree: {btree_count}")
+
+    if all_consistent:
+        print("\n  [SUCCESS] All configurations returned consistent results!")
+    else:
+        print("\n  [WARNING] Inconsistencies detected between configurations!")
 
     # Analysis
     print("\n--- ANALYSIS ---")

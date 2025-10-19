@@ -27,6 +27,15 @@ def test_with_config(config_name, use_secondary_index=False):
 
     # Create unique database
     db_name = f"comp3_{config_name.replace(' ', '_').lower()}_db"
+
+    # Clean up previous test data if it exists
+    import shutil
+    # DatabaseManager creates databases in ./data/databases/
+    db_path = os.path.join("data", "databases", db_name)
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+        print(f"  [CLEANUP] Removed existing database at {db_path}")
+
     db_manager = DatabaseManager(db_name)
     executor = Executor(db_manager)
 
@@ -51,7 +60,7 @@ def test_with_config(config_name, use_secondary_index=False):
     # LOAD DATA
     print(f"\nLoading data...")
     load_sql = """
-    LOAD DATA FROM FILE "data/datasets/worldcities_10k.csv"
+    LOAD DATA FROM FILE "data/datasets/worldcities_1k.csv"
     INTO cities
     """
 
@@ -116,6 +125,7 @@ def test_with_config(config_name, use_secondary_index=False):
     search_reads = []
     search_times = []
     search_counts = []
+    search_results_details = {}  # Store actual results for verification
 
     for start_country, end_country in range_queries:
         search_sql = f'SELECT * FROM cities WHERE country BETWEEN "{start_country}" AND "{end_country}"'
@@ -126,6 +136,21 @@ def test_with_config(config_name, use_secondary_index=False):
         search_times.append(result.execution_time_ms)
         search_counts.append(len(result.data))
 
+        # Store results for verification
+        range_key = f"{start_country}-{end_country}"
+        search_results_details[range_key] = {
+            'count': len(result.data),
+            'records': result.data[:3] if result.data else []  # Store first 3 records
+        }
+
+        # Print what was found
+        if result.data:
+            print(f"    {start_country} to {end_country}: Found {len(result.data)} record(s) - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+            for rec in result.data[:2]:  # Show first 2 records
+                print(f"      -> {rec}")
+        else:
+            print(f"    {start_country} to {end_country}: NOT FOUND - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+
     search_metrics = {
         'avg_reads': sum(search_reads) / len(search_reads),
         'avg_time_ms': sum(search_times) / len(search_times),
@@ -133,7 +158,7 @@ def test_with_config(config_name, use_secondary_index=False):
         'samples': len(range_queries)
     }
 
-    print(f"  Range search by country (avg of {len(range_queries)} queries):")
+    print(f"\n  Summary - Range search by country (avg of {len(range_queries)} queries):")
     print(f"    Avg Reads: {search_metrics['avg_reads']:.2f}")
     print(f"    Avg Time: {search_metrics['avg_time_ms']:.2f}ms")
     print(f"    Avg Results: {search_metrics['avg_results']:.0f} cities")
@@ -141,7 +166,8 @@ def test_with_config(config_name, use_secondary_index=False):
     return {
         'config': config_name,
         'insert': insert_metrics,
-        'search': search_metrics
+        'search': search_metrics,
+        'search_details': search_results_details
     }
 
 def main():
@@ -180,11 +206,39 @@ def main():
         print(f"  {res['config']:<30} {rw:<20} {ins['total_insertion_time_ms']:.2f}")
 
     print("\n--- RANGE SEARCH PERFORMANCE (by country field) ---")
-    print(f"  {'Configuration':<30} {'Avg Reads':<15} {'Avg Time (ms)'}")
-    print(f"  {'-'*60}")
+    print(f"  {'Configuration':<30} {'Avg Reads':<15} {'Avg Time (ms)':<15} {'Avg Results'}")
+    print(f"  {'-'*75}")
     for res in all_results:
         srch = res['search']
-        print(f"  {res['config']:<30} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:.2f}")
+        print(f"  {res['config']:<30} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:<15.2f} {srch['avg_results']:.1f}")
+
+    # CONSISTENCY VERIFICATION
+    print("\n--- CONSISTENCY VERIFICATION ---")
+    range_queries = [
+        ("A", "C"),
+        ("J", "M"),
+        ("S", "U"),
+        ("Germany", "India"),
+        ("Brazil", "Canada")
+    ]
+
+    all_consistent = True
+    for start_country, end_country in range_queries:
+        range_key = f"{start_country}-{end_country}"
+        no_idx_count = all_results[0]['search_details'][range_key]['count']
+        btree_count = all_results[1]['search_details'][range_key]['count']
+
+        if no_idx_count == btree_count:
+            status = "[OK]" if no_idx_count > 0 else "[OK] (empty range)"
+            print(f"  {range_key:<20}: {status} - Both configs found {no_idx_count} record(s)")
+        else:
+            all_consistent = False
+            print(f"  {range_key:<20}: [INCONSISTENT] - No Index: {no_idx_count}, B+Tree: {btree_count}")
+
+    if all_consistent:
+        print("\n  [SUCCESS] All configurations returned consistent results!")
+    else:
+        print("\n  [WARNING] Inconsistencies detected between configurations!")
 
     # Analysis
     print("\n--- ANALYSIS ---")
