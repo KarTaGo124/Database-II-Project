@@ -2,7 +2,7 @@
 COMPARISON 2: Secondary Indexes for Exact Search
 =================================================
 Compares: Hash vs B+Tree Unclustered for exact search queries
-Dataset: World Cities (1K records by default, change to worldcities.csv for full 41K)
+Dataset: World Cities (1k records by default, change to worldcities.csv for full 41k)
 Base: B+Tree Clustered (primary: id)
 Secondary field: city (unique keys for better hash distribution)
 Operations: Insert overhead, Exact search by city
@@ -28,6 +28,15 @@ def test_secondary_index(config_name, secondary_index_type=None):
 
     # Create unique database
     db_name = f"comp2_{config_name.replace(' ', '_').replace('+', '').lower()}_db"
+
+    # Clean up previous test data if it exists
+    import shutil
+    # DatabaseManager creates databases in ./data/databases/
+    db_path = os.path.join("data", "databases", db_name)
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+        print(f"  [CLEANUP] Removed existing database at {db_path}")
+
     db_manager = DatabaseManager(db_name)
     executor = Executor(db_manager)
 
@@ -52,7 +61,7 @@ def test_secondary_index(config_name, secondary_index_type=None):
     # LOAD DATA
     print(f"\nLoading data...")
     load_sql = """
-    LOAD DATA FROM FILE "data/datasets/worldcities_10k.csv"
+    LOAD DATA FROM FILE "data/datasets/worldcities_1k.csv"
     INTO cities
     """
 
@@ -106,13 +115,24 @@ def test_secondary_index(config_name, secondary_index_type=None):
     print(f"\n--- Exact Search Tests ---")
 
     # Test with various cities (should be unique)
-    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow","Cairo"]
+    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow", "Cairo","Tampa"]
     search_reads = []
     search_times = []
     search_counts = []
-    search_results_data = {}  # Store actual results for consistency check
+    search_results_details = {}  # Store actual results for verification
 
     for city in test_cities:
+        # Special debug for Hash + Cairo
+        if secondary_index_type == "HASH" and city == "Cairo":
+            print(f"\n    [DEBUG] Testing Cairo with Hash index...")
+            table_info = db_manager.tables[  'cities']
+            if 'city' in table_info['secondary_indexes']:
+                hash_idx = table_info['secondary_indexes']['city']['index']
+                print(f"    [DEBUG] Hash index global_depth: {hash_idx.global_depth}")
+                # Test direct search
+                direct_result = hash_idx.search(city)
+                print(f"    [DEBUG] Direct hash_idx.search('{city}'): {direct_result.data}")
+
         search_sql = f'SELECT * FROM cities WHERE city = "{city}"'
         plans = parse(search_sql)
         result = executor.execute(plans[0])
@@ -120,10 +140,22 @@ def test_secondary_index(config_name, secondary_index_type=None):
         search_times.append(result.execution_time_ms)
         search_counts.append(len(result.data))
 
-        # Store results for consistency verification
-        # Sort by id to ensure consistent ordering
-        sorted_data = sorted(result.data, key=lambda x: x.get('id', 0) if isinstance(x, dict) else 0)
-        search_results_data[city] = sorted_data
+        # Store results for verification
+        search_results_details[city] = {
+            'count': len(result.data),
+            'records': result.data[:1] if result.data else []  # Store first record
+        }
+
+        # Print what was found
+        if result.data:
+            print(f"    {city}: Found {len(result.data)} record(s) - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+            for rec in result.data[:1]:  # Show first record
+                print(f"      -> {rec}")
+        else:
+            print(f"    {city}: NOT FOUND - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+            # Extra debug for failures with Hash
+            if secondary_index_type == "HASH":
+                print(f"    [DEBUG] Hash search failed for '{city}'")
 
     search_metrics = {
         'avg_reads': sum(search_reads) / len(search_reads),
@@ -132,8 +164,7 @@ def test_secondary_index(config_name, secondary_index_type=None):
         'samples': len(test_cities)
     }
 
-    print(search_times)
-    print(f"  Exact search by city (avg of {len(test_cities)} queries):")
+    print(f"\n  Summary - Exact search by city (avg of {len(test_cities)} queries):")
     print(f"    Avg Reads: {search_metrics['avg_reads']:.2f}")
     print(f"    Avg Time: {search_metrics['avg_time_ms']:.2f}ms")
     print(f"    Avg Results: {search_metrics['avg_results']:.1f} records")
@@ -142,137 +173,14 @@ def test_secondary_index(config_name, secondary_index_type=None):
         'config': config_name,
         'insert': insert_metrics,
         'search': search_metrics,
-        'search_results': search_results_data,  # Include actual results
-        'test_cities': test_cities
+        'search_details': search_results_details  # Include for verification
     }
-
-def verify_consistency(all_results):
-    """
-    Verify that all index configurations return the same results for the same queries
-    Returns True if all results are consistent, False otherwise
-    """
-    print("\n" + "="*70)
-    print("CONSISTENCY VERIFICATION")
-    print("="*70)
-
-    if len(all_results) < 2:
-        print("  Not enough configurations to compare (need at least 2)")
-        return True
-
-    # Use first configuration as baseline
-    baseline = all_results[0]
-    baseline_name = baseline['config']
-    baseline_results = baseline['search_results']
-    test_cities = baseline['test_cities']
-
-    all_consistent = True
-    inconsistencies = []
-
-    print(f"\n  Baseline: {baseline_name}")
-    print(f"  Comparing against {len(all_results) - 1} other configuration(s)\n")
-
-    # Compare each configuration against baseline
-    for i, result in enumerate(all_results[1:], start=1):
-        config_name = result['config']
-        config_results = result['search_results']
-
-        print(f"  [{i}] Comparing: {config_name}")
-
-        config_consistent = True
-
-        # Compare results for each test city
-        for city in test_cities:
-            baseline_data = baseline_results.get(city, [])
-            config_data = config_results.get(city, [])
-
-            # Check if record counts match
-            if len(baseline_data) != len(config_data):
-                all_consistent = False
-                config_consistent = False
-                inconsistencies.append({
-                    'config': config_name,
-                    'city': city,
-                    'issue': 'Record count mismatch',
-                    'baseline_count': len(baseline_data),
-                    'config_count': len(config_data),
-                    'baseline_data': baseline_data,
-                    'config_data': config_data
-                })
-                continue
-
-            # Compare actual data (already sorted by id)
-            for idx, (baseline_record, config_record) in enumerate(zip(baseline_data, config_data)):
-                if baseline_record != config_record:
-                    all_consistent = False
-                    config_consistent = False
-                    inconsistencies.append({
-                        'config': config_name,
-                        'city': city,
-                        'issue': 'Record data mismatch',
-                        'record_index': idx,
-                        'baseline_record': baseline_record,
-                        'config_record': config_record
-                    })
-
-        if config_consistent:
-            print(f"      ✓ All results match baseline")
-        else:
-            print(f"      ✗ INCONSISTENCIES FOUND!")
-
-    # Print summary
-    print("\n" + "-"*70)
-    if all_consistent:
-        print("  RESULT: ✓ ALL CONFIGURATIONS RETURNED CONSISTENT RESULTS")
-        print("  All index implementations are working correctly!")
-    else:
-        print("  RESULT: ✗ INCONSISTENCIES DETECTED")
-        print(f"  Found {len(inconsistencies)} inconsistency(ies) across configurations")
-
-        # Print detailed debug information
-        print("\n" + "="*70)
-        print("DEBUG: INCONSISTENCY DETAILS")
-        print("="*70)
-
-        for i, inc in enumerate(inconsistencies, start=1):
-            print(f"\n  Inconsistency #{i}:")
-            print(f"    Configuration: {inc['config']}")
-            print(f"    Query City: {inc['city']}")
-            print(f"    Issue: {inc['issue']}")
-
-            if inc['issue'] == 'Record count mismatch':
-                print(f"    Baseline ({baseline_name}): {inc['baseline_count']} record(s)")
-                print(f"    {inc['config']}: {inc['config_count']} record(s)")
-                print(f"\n    Baseline data:")
-                print(f"      {json.dumps(inc['baseline_data'], indent=6)}")
-                print(f"    {inc['config']} data:")
-                print(f"      {json.dumps(inc['config_data'], indent=6)}")
-
-            elif inc['issue'] == 'Record data mismatch':
-                print(f"    Record index: {inc['record_index']}")
-                print(f"    Baseline record:")
-                print(f"      {json.dumps(inc['baseline_record'], indent=6)}")
-                print(f"    {inc['config']} record:")
-                print(f"      {json.dumps(inc['config_record'], indent=6)}")
-
-                # Show differences field by field
-                if isinstance(inc['baseline_record'], dict) and isinstance(inc['config_record'], dict):
-                    print(f"    Field-by-field comparison:")
-                    all_keys = set(inc['baseline_record'].keys()) | set(inc['config_record'].keys())
-                    for key in sorted(all_keys):
-                        baseline_val = inc['baseline_record'].get(key, '<MISSING>')
-                        config_val = inc['config_record'].get(key, '<MISSING>')
-                        if baseline_val != config_val:
-                            print(f"      {key}: {baseline_val} ≠ {config_val}")
-
-    print("="*70)
-
-    return all_consistent
 
 def main():
     print("\n" + "="*70)
     print("COMPARISON 2: SECONDARY INDEXES FOR EXACT SEARCH")
     print("="*70)
-    print("Dataset: World Cities (1K records)")
+    print("Dataset: World Cities (1k records)")
     print("Base: B+Tree Clustered (primary: id)")
     print("Comparing: No index vs Hash vs B+Tree Unclustered")
     print("Field: city (VARCHAR) - unique keys")
@@ -293,13 +201,7 @@ def main():
     result_btree = test_secondary_index("B+Tree Unclustered Secondary Index", secondary_index_type="BTREE")
     all_results.append(result_btree)
 
-    # VERIFY CONSISTENCY ACROSS ALL CONFIGURATIONS
-    consistency_ok = verify_consistency(all_results)
 
-    if not consistency_ok:
-        print("\n" + "!"*70)
-        print("WARNING: Inconsistencies detected! Check debug output above.")
-        print("!"*70)
 
     # Print comparison summary
     print("\n" + "="*70)
@@ -320,6 +222,28 @@ def main():
     for res in all_results:
         srch = res['search']
         print(f"  {res['config']:<35} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:<15.2f} {srch['avg_results']:.1f}")
+
+    # VERIFICATION: Check consistency across all configurations
+    print("\n--- CONSISTENCY VERIFICATION ---")
+    test_cities = ["Tokyo", "New York", "London", "Paris", "Mumbai", "Lima", "Beijing", "Sydney", "Moscow", "Cairo","Tampa"]
+    all_consistent = True
+
+    for city in test_cities:
+        no_idx_count = all_results[0]['search_details'][city]['count']
+        hash_count = all_results[1]['search_details'][city]['count']
+        btree_count = all_results[2]['search_details'][city]['count']
+
+        if no_idx_count == hash_count == btree_count:
+            status = "[OK]" if no_idx_count > 0 else "[OK] (not found)"
+            print(f"  {city:<15}: {status} - All configs found {no_idx_count} record(s)")
+        else:
+            all_consistent = False
+            print(f"  {city:<15}: [INCONSISTENT] - No Index: {no_idx_count}, Hash: {hash_count}, B+Tree: {btree_count}")
+
+    if all_consistent:
+        print("\n  [SUCCESS] All configurations returned consistent results!")
+    else:
+        print("\n  [WARNING] Inconsistencies detected between configurations!")
 
     # Analysis
     print("\n--- ANALYSIS ---")

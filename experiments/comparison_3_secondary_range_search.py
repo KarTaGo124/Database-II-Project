@@ -2,7 +2,7 @@
 COMPARISON 3: Secondary Index for Range Search
 ===============================================
 Compares: B+Tree Unclustered vs No Index for range queries
-Dataset: World Cities (1K records by default, change to worldcities.csv for full 41K)
+Dataset: World Cities (10k records by default, change to worldcities.csv for full 410k)
 Base: B+Tree Clustered (primary: id)
 Secondary field: country (tests duplicate key handling)
 Operations: Insert overhead, Range search by country name
@@ -27,6 +27,15 @@ def test_with_config(config_name, use_secondary_index=False):
 
     # Create unique database
     db_name = f"comp3_{config_name.replace(' ', '_').lower()}_db"
+
+    # Clean up previous test data if it exists
+    import shutil
+    # DatabaseManager creates databases in ./data/databases/
+    db_path = os.path.join("data", "databases", db_name)
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+        print(f"  [CLEANUP] Removed existing database at {db_path}")
+
     db_manager = DatabaseManager(db_name)
     executor = Executor(db_manager)
 
@@ -101,39 +110,42 @@ def test_with_config(config_name, use_secondary_index=False):
         insert_metrics['total_insertion_writes'] = insert_metrics['total_writes']
         insert_metrics['total_insertion_time_ms'] = insert_metrics['total_time_ms']
 
-    # TEST: Range search by country name (tests duplicate handling)
-    print(f"\n--- Range Search Tests ---")
-
-    # Test various country ranges
-    range_queries = [
-        ("A", "C"),          # Countries: Argentina, Brazil, etc.
-        ("J", "M"),          # Countries: Japan, Mexico, etc.
-        ("S", "U"),          # Countries: Spain, Turkey, United States, etc.
-        ("Germany", "India"), # Specific range
-        ("Brazil", "Canada")  # Another specific range
+    # TEST: Range search by population (INT)
+    print(f"\n--- Range Search Tests (population INT) ---")
+    population_queries = [
+        (100000, 1000000),
+        (1000000, 10000000)
     ]
 
     search_reads = []
     search_times = []
     search_counts = []
+    search_results_details = {}  # Store actual results for verification
 
-    for start_country, end_country in range_queries:
-        search_sql = f'SELECT * FROM cities WHERE country BETWEEN "{start_country}" AND "{end_country}"'
+    for start_pop, end_pop in population_queries:
+        search_sql = f'SELECT * FROM cities WHERE population BETWEEN {start_pop} AND {end_pop}'
         plans = parse(search_sql)
         result = executor.execute(plans[0])
-
+        key = f"population_{start_pop}_{end_pop}"
+        search_results_details[key] = {
+            'count': len(result.data),
+            'records': result.data[:3] if result.data else []
+        }
         search_reads.append(result.disk_reads)
         search_times.append(result.execution_time_ms)
         search_counts.append(len(result.data))
+        print(f"    {start_pop} to {end_pop}: Found {len(result.data)} record(s) - Reads: {result.disk_reads}, Time: {result.execution_time_ms:.2f}ms")
+        for rec in result.data[:2]:
+            print(f"      -> {rec}")
 
     search_metrics = {
         'avg_reads': sum(search_reads) / len(search_reads),
         'avg_time_ms': sum(search_times) / len(search_times),
         'avg_results': sum(search_counts) / len(search_counts),
-        'samples': len(range_queries)
+        'samples': len(population_queries)
     }
 
-    print(f"  Range search by country (avg of {len(range_queries)} queries):")
+    print(f"\n  Summary - Range search by population (avg of {len(population_queries)} queries):")
     print(f"    Avg Reads: {search_metrics['avg_reads']:.2f}")
     print(f"    Avg Time: {search_metrics['avg_time_ms']:.2f}ms")
     print(f"    Avg Results: {search_metrics['avg_results']:.0f} cities")
@@ -141,7 +153,8 @@ def test_with_config(config_name, use_secondary_index=False):
     return {
         'config': config_name,
         'insert': insert_metrics,
-        'search': search_metrics
+        'search': search_metrics,
+        'search_details': search_results_details
     }
 
 def main():
@@ -180,14 +193,37 @@ def main():
         print(f"  {res['config']:<30} {rw:<20} {ins['total_insertion_time_ms']:.2f}")
 
     print("\n--- RANGE SEARCH PERFORMANCE (by country field) ---")
-    print(f"  {'Configuration':<30} {'Avg Reads':<15} {'Avg Time (ms)'}")
-    print(f"  {'-'*60}")
+    print(f"  {'Configuration':<30} {'Avg Reads':<15} {'Avg Time (ms)':<15} {'Avg Results'}")
+    print(f"  {'-'*75}")
     for res in all_results:
         srch = res['search']
-        print(f"  {res['config']:<30} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:.2f}")
+        print(f"  {res['config']:<30} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:<15.2f} {srch['avg_results']:.1f}")
+
+    # CONSISTENCY VERIFICATION
+    print("\n--- CONSISTENCY VERIFICATION ---")
+    population_range_queries = [
+        (100000, 1000000),
+        (1000000, 10000000)
+    ]
+    all_consistent = True
+    for start_pop, end_pop in population_range_queries:
+        range_key = f"population_{start_pop}_{end_pop}"
+        no_idx_count = all_results[0]['search_details'][range_key]['count']
+        btree_count = all_results[1]['search_details'][range_key]['count']
+
+        if no_idx_count == btree_count:
+            status = "[OK]" if no_idx_count > 0 else "[OK] (empty range)"
+            print(f"  {range_key:<25}: {status} - Both configs found {no_idx_count} record(s)")
+        else:
+            all_consistent = False
+            print(f"  {range_key:<25}: [INCONSISTENT] - No Index: {no_idx_count}, B+Tree: {btree_count}")
+
+    if all_consistent:
+        print("\n  [SUCCESS] All configurations returned consistent results!")
+    else:
+        print("\n  [WARNING] Inconsistencies detected between configurations!")
 
     # Analysis
-    print("\n--- ANALYSIS ---")
     no_idx = all_results[0]
     btree_idx = all_results[1]
 

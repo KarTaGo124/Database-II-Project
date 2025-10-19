@@ -71,7 +71,10 @@ class Bucket:
             normalized_record = extendible_hash._normalize_value(record.index_value)
             
             if debug:
-                print(f"    [BUCKET DEBUG] Record {i}: {repr(record.index_value)} -> {repr(normalized_record)} (match: {normalized_record == normalized_search})")
+                try:
+                    print(f"    [BUCKET DEBUG] Record {i}: {repr(record.index_value)} -> {repr(normalized_record)} (match: {normalized_record == normalized_search})")
+                except UnicodeEncodeError:
+                    print(f"    [BUCKET DEBUG] Record {i}: <UnicodeEncodeError> (match: {normalized_record == normalized_search})")
             
             if normalized_record == normalized_search:
                 matching_pks.append(record.primary_key)
@@ -98,9 +101,21 @@ class Bucket:
 
         self.performance.track_write()
 
-    def insert(self, index_record: IndexRecord, bucket_pos, bucketfile):
+    def insert(self, index_record: IndexRecord, bucket_pos, bucketfile, extendible_hash=None):
         if self.is_full():
             return False
+
+        # VALIDACIÓN DE DUPLICADOS: Verificar si (index_value, primary_key) ya existe
+        for existing_record in self.records:
+            if extendible_hash:
+                existing_normalized = extendible_hash._normalize_value(existing_record.index_value)
+                new_normalized = extendible_hash._normalize_value(index_record.index_value)
+                if existing_normalized == new_normalized and existing_record.primary_key == index_record.primary_key:
+                    # Duplicado exacto encontrado - no insertar
+                    return False
+            else:
+                if existing_record.index_value == index_record.index_value and existing_record.primary_key == index_record.primary_key:
+                    return False
 
         insert_position = None
         tombstone = b'\x00' * self.index_record_size
@@ -268,19 +283,37 @@ class ExtendibleHashing:
             dirfile.write(struct.pack(self.HEADER_FORMAT, self.global_depth, self.first_free_bucket_pos))
             self.performance.track_write()
 
-    def search(self, secondary_value):
+    def search(self, secondary_value, debug=False):
         self.performance.start_operation()
+
+        if debug:
+            print(f"\n[HASH SEARCH DEBUG] Searching for: {repr(secondary_value)}")
+            normalized = self._normalize_value(secondary_value)
+            print(f"[HASH SEARCH DEBUG] Normalized: {repr(normalized)}")
+            hash_val = self._hash_key(secondary_value)
+            dir_index = hash_val % (2 ** self.global_depth)
+            print(f"[HASH SEARCH DEBUG] Hash value: {hash_val}")
+            print(f"[HASH SEARCH DEBUG] Directory index: {dir_index}")
+            print(f"[HASH SEARCH DEBUG] Global depth: {self.global_depth}")
 
         with open(self.dirname, 'rb') as dirfile, open(self.bucketname, 'rb') as bucketfile:
             bucket, bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
+
+            if debug:
+                print(f"[HASH SEARCH DEBUG] Bucket position: {bucket_pos}")
+                print(f"[HASH SEARCH DEBUG] Bucket has {bucket.num_records} records")
+
             matching_pk = []
 
             current_pos = bucket_pos
             current_bucket = bucket
             bucket_num = 0
             while current_bucket is not None:
-                bucket_matches = current_bucket.search(secondary_value, self)
+                bucket_matches = current_bucket.search(secondary_value, self, debug=debug)
                 matching_pk.extend(bucket_matches)
+
+                if debug:
+                    print(f"[HASH SEARCH DEBUG] Bucket {bucket_num} found {len(bucket_matches)} matches")
 
                 if current_bucket.next_overflow_bucket != -1:
                     current_pos = current_bucket.next_overflow_bucket
@@ -289,21 +322,37 @@ class ExtendibleHashing:
                     bucket_num += 1
                 else:
                     break
+
+            if debug:
+                print(f"[HASH SEARCH DEBUG] Total matches found: {len(matching_pk)}")
+                print(f"[HASH SEARCH DEBUG] Matching PKs: {matching_pk}\n")
+
             return self.performance.end_operation(matching_pk)
 
-    def insert(self, index_record: IndexRecord):
+    def insert(self, index_record: IndexRecord, debug=False):
         self.performance.start_operation()
-
-        if index_record.index_value is not None:
-            normalized = self._normalize_value(index_record.index_value)
-            index_record.index_value = normalized
 
         secondary_value = index_record.index_value
         if secondary_value is None:
             return self.performance.end_operation(True)
 
+        # IMPORTANTE: Convertir el valor a bytes si es string para consistencia
+        # Los valores deben almacenarse siempre como bytes en disco
+        if isinstance(index_record.index_value, str):
+            # Convertir string a bytes (como hace Record._process_value para CHAR)
+            index_record.index_value = index_record.index_value.encode('utf-8')[:self.index_record_template.value_type_size[0][2]]
+
+        if debug:
+            print(f"[HASH INSERT DEBUG] Original: {repr(secondary_value)}")
+            print(f"[HASH INSERT DEBUG] Stored as: {repr(index_record.index_value)}")
+            print(f"[HASH INSERT DEBUG] Normalized for hash: {repr(self._normalize_value(secondary_value))}")
+            print(f"[HASH INSERT DEBUG] Primary key: {index_record.primary_key}")
+
         with open(self.dirname, 'r+b') as dirfile, open(self.bucketname, 'r+b') as bucketfile:
-            self._insert_index_record(index_record, dirfile, bucketfile)
+            # Pasar el valor original para calcular el hash correctamente
+            result = self._insert_index_record(index_record, dirfile, bucketfile, debug=debug, original_value=secondary_value)
+            if debug:
+                print(f"[HASH INSERT DEBUG] Insert result: {result}")
             return self.performance.end_operation(True)
 
     def delete(self, secondary_value, primary_key=None):
@@ -334,17 +383,31 @@ class ExtendibleHashing:
         bucket = Bucket.read_bucket(bucket_pos, bucketfile, self.index_record_template, self.performance)
         return bucket, bucket_pos
 
-    def _insert_index_record(self, index_record, dirfile, bucketfile):
-        secondary_value = index_record.index_value
-        
+    def _insert_index_record(self, index_record, dirfile, bucketfile, debug=False, original_value=None):
+        # Usar original_value si se proporcionó (para calcular hash antes de convertir a bytes)
+        secondary_value = original_value if original_value is not None else index_record.index_value
+
         head_bucket, head_bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
+
+        if debug:
+            hash_val = self._hash_key(secondary_value)
+            dir_index = hash_val % (2 ** self.global_depth)
+            print(f"[HASH INSERT DEBUG] Hash value: {hash_val}")
+            print(f"[HASH INSERT DEBUG] Directory index: {dir_index}")
+            print(f"[HASH INSERT DEBUG] Bucket position: {head_bucket_pos}")
+
         current_bucket = head_bucket
         current_bucket_pos = head_bucket_pos
         overflow_count = 0
 
         while True:
             if current_bucket.has_space():
-                success = current_bucket.insert(index_record, current_bucket_pos, bucketfile)
+                success = current_bucket.insert(index_record, current_bucket_pos, bucketfile, extendible_hash=self)
+                if debug:
+                    if success:
+                        print(f"[HASH INSERT DEBUG] Successfully inserted in bucket at {current_bucket_pos}")
+                    else:
+                        print(f"[HASH INSERT DEBUG] Insert failed (duplicate found) in bucket at {current_bucket_pos}")
                 if success:
                     return True
 
@@ -365,7 +428,7 @@ class ExtendibleHashing:
                 self._add_overflow(current_bucket_pos, overflow_bucket_pos, bucketfile)
                 overflow_bucket = Bucket.read_bucket(overflow_bucket_pos, bucketfile, self.index_record_template,
                                                      self.performance)
-                overflow_bucket.insert(index_record, overflow_bucket_pos, bucketfile)
+                overflow_bucket.insert(index_record, overflow_bucket_pos, bucketfile, extendible_hash=self)
                 return True
             else:
                 self._double_directory(dirfile)
@@ -510,18 +573,44 @@ class ExtendibleHashing:
                 bucket_groups[target_bucket_pos] = []
             bucket_groups[target_bucket_pos].append(index_record)
 
+        # Redistribuir los registros en los buckets correctos
+        # Si un bucket se llena, crear overflow en lugar de perder registros
         for bucket_pos, records in bucket_groups.items():
             bucket = Bucket.read_bucket(bucket_pos, bucketfile, self.index_record_template, self.performance)
 
             for record in records:
-                if bucket.has_space():
-                    bucket.records.append(record)
-                    bucket.num_records += 1
-                else:
+                # Verificar duplicados manualmente antes de agregar
+                is_duplicate = False
+                for existing_record in bucket.records:
+                    existing_normalized = self._normalize_value(existing_record.index_value)
+                    new_normalized = self._normalize_value(record.index_value)
+                    if existing_normalized == new_normalized and existing_record.primary_key == record.primary_key:
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    # Intentar agregar al bucket principal
                     if len(bucket.records) < BLOCK_FACTOR:
                         bucket.records.append(record)
                         bucket.num_records += 1
+                    else:
+                        # Bucket lleno - crear overflow si no existe
+                        if bucket.next_overflow_bucket == -1:
+                            # Crear nuevo bucket de overflow
+                            overflow_pos = self._append_new_bucket(bucket.local_depth, bucketfile)
+                            bucket.next_overflow_bucket = overflow_pos
+                            bucket.write_bucket(bucket_pos, bucketfile)
 
+                            # Leer el bucket de overflow recién creado
+                            bucket = Bucket.read_bucket(overflow_pos, bucketfile, self.index_record_template, self.performance)
+                            bucket_pos = overflow_pos
+
+                        # Agregar al bucket actual (principal u overflow)
+                        if len(bucket.records) < BLOCK_FACTOR:
+                            bucket.records.append(record)
+                            bucket.num_records += 1
+
+            # Escribir el bucket final
             bucket.write_bucket(bucket_pos, bucketfile)
 
     def _get_all_records_from_bucket(self, bucket, bucket_pos, bucketfile):

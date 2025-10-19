@@ -105,6 +105,7 @@ class DatabaseManager:
                     total_time += scan_result.execution_time_ms
 
                     field_type, field_size = field_info
+                    skipped_duplicates = 0
                     for record in existing_records:
                         secondary_value = getattr(record, field_name)
                         primary_key = record.get_key()
@@ -117,7 +118,15 @@ class DatabaseManager:
                         total_reads += insert_result.disk_reads
                         total_writes += insert_result.disk_writes
                         total_time += insert_result.execution_time_ms
-                        records_indexed += 1
+
+                        # Check if insert was actually successful (for hash, it may skip duplicates)
+                        if insert_result.disk_writes > 0 or index_type != "HASH":
+                            records_indexed += 1
+                        else:
+                            skipped_duplicates += 1
+
+                    if skipped_duplicates > 0:
+                        print(f"[DEBUG] Skipped {skipped_duplicates} duplicate records during index creation")
 
                 except Exception as e:
                     del table_info["secondary_indexes"][field_name]

@@ -1,0 +1,3 @@
+Configuration,Avg_Reads,Avg_Time_ms,Avg_Results,Samples
+No Secondary Index,30.0,4.432439804077148,67.2,5
+B+Tree Unclustered Index,117.6,10.02511978149414,56.2,5
