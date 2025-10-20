@@ -6,7 +6,7 @@ from ..core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 20
 MAX_OVERFLOW = 2
-MIN_N = BLOCK_FACTOR/2
+MIN_N = BLOCK_FACTOR // 2
 
 
 class Bucket:
@@ -60,18 +60,17 @@ class Bucket:
         matching_pks = []
         # Normalizar el valor de búsqueda UNA VEZ
         normalized_search = extendible_hash._normalize_value(secondary_value)
-        
-               
+
         for i, record in enumerate(self.records):
             # Normalizar el valor del registro
             normalized_record = extendible_hash._normalize_value(record.index_value)
-            
+
             if normalized_record == normalized_search:
                 matching_pks.append(record.primary_key)
-        
+
         if debug:
             print(f"    [BUCKET DEBUG] Found {len(matching_pks)} matches")
-        
+
         return matching_pks
 
     def write_bucket(self, bucket_pos, bucketfile):
@@ -140,7 +139,7 @@ class Bucket:
     def delete(self, key, bucket_pos, bucketfile, pk=None, extendible_hash=None):
         tombstone = b'\x00' * self.index_record_size
         deleted_pks = []
-        
+
         # Normalizar la key de búsqueda
         if extendible_hash:
             normalized_key = extendible_hash._normalize_value(key)
@@ -154,7 +153,7 @@ class Bucket:
                 stored_key = extendible_hash._normalize_value(record.index_value)
             else:
                 stored_key = record.index_value
-            
+
             should_delete = False
 
             if stored_key == normalized_key:
@@ -223,18 +222,18 @@ class ExtendibleHashing:
         self.global_depth, self.first_free_bucket_pos = self._read_header()
 
     def warm_up(self):
-    
+
         temp_tracker = PerformanceTracker()
         old_tracker = self.performance
         self.performance = temp_tracker
-        
+
         try:
             with open(self.dirname, 'rb') as dirfile:
                 dirfile.read(self.HEADER_SIZE)
-                
+
                 dir_size = 2 ** self.global_depth
                 dirfile.read(dir_size * self.DIR_SIZE)
-            
+
             with open(self.bucketname, 'rb') as bucketfile:
                 bucket_size = Bucket.HEADER_SIZE + (BLOCK_FACTOR * self.index_record_size)
                 for _ in range(min(10, 2 ** self.global_depth)):
@@ -304,7 +303,6 @@ class ExtendibleHashing:
                 else:
                     break
 
-            
             return self.performance.end_operation(matching_pk)
 
     def insert(self, index_record: IndexRecord, debug=False):
@@ -318,12 +316,13 @@ class ExtendibleHashing:
         # Los valores deben almacenarse siempre como bytes en disco
         if isinstance(index_record.index_value, str):
             # Convertir string a bytes (como hace Record._process_value para CHAR)
-            index_record.index_value = index_record.index_value.encode('utf-8')[:self.index_record_template.value_type_size[0][2]]
+            index_record.index_value = index_record.index_value.encode('utf-8')[
+                                       :self.index_record_template.value_type_size[0][2]]
 
-      
         with open(self.dirname, 'r+b') as dirfile, open(self.bucketname, 'r+b') as bucketfile:
             # Pasar el valor original para calcular el hash correctamente
-            result = self._insert_index_record(index_record, dirfile, bucketfile, debug=debug, original_value=secondary_value)
+            result = self._insert_index_record(index_record, dirfile, bucketfile, debug=debug,
+                                               original_value=secondary_value)
             return self.performance.end_operation(True)
 
     def delete(self, secondary_value, primary_key=None):
@@ -331,13 +330,18 @@ class ExtendibleHashing:
 
         with open(self.dirname, 'r+b') as dirfile, open(self.bucketname, 'r+b') as bucketfile:
             bucket, bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
-            deleted_pks = bucket.delete(secondary_value, bucket_pos, bucketfile, primary_key, self)
+            deleted_pks = []
+            head = bucket
+            while bucket is not None:
+                deleted_pks += bucket.delete(secondary_value, bucket_pos, bucketfile, primary_key, self)
+                bucket_pos = bucket.next_overflow_bucket
+                bucket = Bucket.read_bucket(bucket_pos, bucketfile, self.index_record_template, self.performance)
 
-            if bucket.num_records <= MIN_N:
-                if bucket.next_overflow_bucket != -1:
-                    self._overflow_to_main_bucket(bucket, bucket_pos, dirfile, bucketfile)
-                elif bucket.num_records == 0:
-                    self._handle_empty_bucket(bucket, bucket_pos, dirfile, bucketfile)
+            if head.num_records <= MIN_N:
+                if head.next_overflow_bucket != -1:
+                    self._overflow_to_main_bucket(head, bucket_pos, dirfile, bucketfile)
+                elif head.num_records == 0:
+                    self._handle_empty_bucket(head, bucket_pos, dirfile, bucketfile)
 
             if primary_key is None:
                 return self.performance.end_operation(deleted_pks)
@@ -360,7 +364,6 @@ class ExtendibleHashing:
 
         head_bucket, head_bucket_pos = self._get_bucket_from_key(secondary_value, dirfile, bucketfile)
 
-    
         current_bucket = head_bucket
         current_bucket_pos = head_bucket_pos
         overflow_count = 0
@@ -562,7 +565,8 @@ class ExtendibleHashing:
                             bucket.write_bucket(bucket_pos, bucketfile)
 
                             # Leer el bucket de overflow recién creado
-                            bucket = Bucket.read_bucket(overflow_pos, bucketfile, self.index_record_template, self.performance)
+                            bucket = Bucket.read_bucket(overflow_pos, bucketfile, self.index_record_template,
+                                                        self.performance)
                             bucket_pos = overflow_pos
 
                         # Agregar al bucket actual (principal u overflow)
