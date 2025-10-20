@@ -161,22 +161,57 @@ class RTreeSecondaryIndex:
     
     def drop_index(self):
         removed_files = []
-        
+
         try:
-            self.idx.close()
-            
+            # Asegurar que el índice esté cerrado
+            if hasattr(self, 'idx') and self.idx is not None:
+                try:
+                    self.idx.close()
+                except Exception:
+                    pass
+
+            # Intentar eliminar archivos múltiples veces si es necesario
+            import time
+            import gc
+
+            # Forzar recolección de basura para liberar referencias
+            gc.collect()
+
             for ext in ['.dat', '.idx']:
                 filepath = f"{self.filename}{ext}"
                 if os.path.exists(filepath):
-                    os.remove(filepath)
-                    removed_files.append(filepath)
+                    # Intentar hasta 5 veces con delay incremental
+                    for attempt in range(5):
+                        try:
+                            os.remove(filepath)
+                            removed_files.append(filepath)
+                            break
+                        except PermissionError:
+                            if attempt < 4:
+                                time.sleep(0.2 * (attempt + 1))  # 0.2s, 0.4s, 0.6s, 0.8s
+                            else:
+                                print(f"No se pudo eliminar {filepath} (en uso)")
+                        except Exception as e:
+                            print(f"ERROR al eliminar {filepath}: {e}")
+                            break
         except Exception as e:
             print(f"ERROR AL ELIMINAR ARCHIVOS DEL ÍNDICE R-Tree: {e}")
-        
+
         return removed_files
     
     def close(self):
         try:
-            self.idx.close()
+            if hasattr(self, 'idx') and self.idx is not None:
+                self.idx.close()
+                self.idx = None  # Eliminar referencia
         except Exception as e:
             print(f"ERROR AL CERRAR EL ÍNDICE R-Tree: {e}")
+
+    def __del__(self):
+        """Destructor para asegurar que el índice se cierre al eliminar el objeto"""
+        try:
+            if hasattr(self, 'idx') and self.idx is not None:
+                self.idx.close()
+                self.idx = None
+        except Exception:
+            pass

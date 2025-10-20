@@ -6,7 +6,7 @@ from ..core.performance_tracker import PerformanceTracker
 
 BLOCK_FACTOR = 20
 MAX_OVERFLOW = 2
-MIN_N = BLOCK_FACTOR / 2
+MIN_N = BLOCK_FACTOR // 2
 
 
 class Bucket:
