@@ -1,0 +1,4 @@
+Configuration,Records,Total_Insertion_Reads,Total_Insertion_Writes,Total_Insertion_Time_ms
+No Secondary Index,"CSV cargado: insertados=40962, duplicados=0, cast_err=39",125795,50638,436264.01925086975
+Hash Secondary Index,"CSV cargado: insertados=40962, duplicados=0, cast_err=39",327410,151350,836070.898771286
+B+Tree Unclustered Secondary Index,"CSV cargado: insertados=40962, duplicados=0, cast_err=39",253787,102233,923343.6930179596
