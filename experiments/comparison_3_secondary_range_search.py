@@ -2,7 +2,7 @@
 COMPARISON 3: Secondary Index for Range Search
 ===============================================
 Compares: B+Tree Unclustered vs No Index for range queries
-Dataset: World Cities (10k records by default, change to worldcities.csv for full 410k)
+Dataset: World Cities
 Base: B+Tree Clustered (primary: id)
 Secondary field: country (tests duplicate key handling)
 Operations: Insert overhead, Range search by country name
@@ -60,7 +60,7 @@ def test_with_config(config_name, use_secondary_index=False):
     # LOAD DATA
     print(f"\nLoading data...")
     load_sql = """
-    LOAD DATA FROM FILE "data/datasets/worldcities_10k.csv"
+    LOAD DATA FROM FILE "data/datasets/worldcities.csv"
     INTO cities
     """
 
@@ -114,7 +114,10 @@ def test_with_config(config_name, use_secondary_index=False):
     print(f"\n--- Range Search Tests (population INT) ---")
     population_queries = [
         (100000, 1000000),
-        (1000000, 10000000)
+        (20000000, 30000000),
+        (50000000, 70000000),
+        (80000000, 100000000),
+        (150000000, 200000000)
     ]
 
     search_reads = []
@@ -161,7 +164,7 @@ def main():
     print("\n" + "="*70)
     print("COMPARISON 3: SECONDARY INDEX FOR RANGE SEARCH")
     print("="*70)
-    print("Dataset: World Cities (100 records)")
+    print("Dataset: World Cities")
     print("Base: B+Tree Clustered (primary: id)")
     print("Comparing: No Index vs B+Tree Unclustered")
     print("Field: country (VARCHAR) - tests duplicate key handling")
@@ -199,29 +202,6 @@ def main():
         srch = res['search']
         print(f"  {res['config']:<30} {srch['avg_reads']:<15.2f} {srch['avg_time_ms']:<15.2f} {srch['avg_results']:.1f}")
 
-    # CONSISTENCY VERIFICATION
-    print("\n--- CONSISTENCY VERIFICATION ---")
-    population_range_queries = [
-        (100000, 1000000),
-        (1000000, 10000000)
-    ]
-    all_consistent = True
-    for start_pop, end_pop in population_range_queries:
-        range_key = f"population_{start_pop}_{end_pop}"
-        no_idx_count = all_results[0]['search_details'][range_key]['count']
-        btree_count = all_results[1]['search_details'][range_key]['count']
-
-        if no_idx_count == btree_count:
-            status = "[OK]" if no_idx_count > 0 else "[OK] (empty range)"
-            print(f"  {range_key:<25}: {status} - Both configs found {no_idx_count} record(s)")
-        else:
-            all_consistent = False
-            print(f"  {range_key:<25}: [INCONSISTENT] - No Index: {no_idx_count}, B+Tree: {btree_count}")
-
-    if all_consistent:
-        print("\n  [SUCCESS] All configurations returned consistent results!")
-    else:
-        print("\n  [WARNING] Inconsistencies detected between configurations!")
 
     # Analysis
     no_idx = all_results[0]

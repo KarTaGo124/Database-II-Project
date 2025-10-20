@@ -2,7 +2,7 @@
 COMPARISON 4: Spatial Indexes (R-Tree)
 =======================================
 Compares: R-Tree spatial index performance
-Dataset: NYC Airbnb (10K records)
+Dataset: NYC Airbnb 
 Base: B+Tree Clustered (primary: id)
 Secondary field: coordinates (ARRAY[FLOAT, 2]) mapped from latitude, longitude
 Operations: Insert overhead, KNN search, Radius search
@@ -58,7 +58,7 @@ def test_rtree():
     # LOAD DATA with mapping
     print(f"\n--- Loading data ---")
     load_sql = """
-    LOAD DATA FROM FILE "data/datasets/airbnb_nyc_10k.csv"
+    LOAD DATA FROM FILE "data/datasets/airbnb_nyc.csv"
     INTO airbnb
     WITH MAPPING (coordinates = ARRAY(latitude, longitude));
     """
@@ -110,7 +110,7 @@ def test_rtree():
     # Times Square: 40.758, -73.9855
     knn_sql = """
     SELECT * FROM airbnb
-    WHERE coordinates NEAREST ((40.758, -73.9855), 10);
+    WHERE coordinates NEAREST ((40.758, -73.9855), 50);
     """
 
     plans = parse(knn_sql)
@@ -120,20 +120,20 @@ def test_rtree():
         'reads': knn_result.disk_reads,
         'writes': knn_result.disk_writes,
         'time_ms': knn_result.execution_time_ms,
-        'results': len(knn_result.data) if hasattr(knn_result.data, '__len__') else 10
+        'results': len(knn_result.data) if hasattr(knn_result.data, '__len__') else 50
     }
 
-    print(f"  Query: 10 nearest to Times Square (40.758, -73.9855)")
+    print(f"  Query: 50 nearest to Times Square (40.758, -73.9855)")
     print(f"  Reads: {knn_result.disk_reads}")
     print(f"  Time: {knn_result.execution_time_ms:.2f}ms")
     print(f"  Results: {results['knn_search']['results']} listings")
 
     # RADIUS SEARCH TEST
     print(f"\n--- Radius Search Test ---")
-    # 0.01 degrees ≈ 1.1km radius around Central Park
+    # 0.05 degrees ≈ 5.5km radius around Central Park
     radius_sql = """
     SELECT * FROM airbnb
-    WHERE coordinates IN ((40.7614, -73.9776), 0.01);
+    WHERE coordinates IN ((40.7614, -73.9776), 0.05);
     """
 
     plans = parse(radius_sql)
@@ -146,7 +146,7 @@ def test_rtree():
         'results': len(radius_result.data) if hasattr(radius_result.data, '__len__') else 0
     }
 
-    print(f"  Query: Radius 0.01 deg (~1.1km) from Central Park (40.7614, -73.9776)")
+    print(f"  Query: Radius 0.05 deg (~5.5km) from Central Park (40.7614, -73.9776)")
     print(f"  Reads: {radius_result.disk_reads}")
     print(f"  Time: {radius_result.execution_time_ms:.2f}ms")
     print(f"  Results: {results['radius_search']['results']} listings")
@@ -157,7 +157,7 @@ def main():
     print("\n" + "="*70)
     print("COMPARISON 4: SPATIAL INDEXES (R-TREE)")
     print("="*70)
-    print("Dataset: NYC Airbnb (10K records)")
+    print("Dataset: NYC Airbnb ")
     print("Base: B+Tree Clustered (primary: id)")
     print("Testing: R-Tree spatial index performance")
     print("Field: coordinates (ARRAY[FLOAT, 2]) from latitude, longitude")
