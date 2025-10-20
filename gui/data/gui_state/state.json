@@ -1,0 +1,154 @@
+{
+  "open_table": null,
+  "last_sql": "CREATE TABLE Restaurantes (\n    id INT KEY INDEX BTREE,\n    nombre VARCHAR[100] INDEX BTREE,\n    ubicacion ARRAY[FLOAT] INDEX RTREE,\n    rating FLOAT INDEX HASH,\n    fecha_apertura DATE\n);\n\nLOAD DATA FROM FILE \"data/datasets/restaurantes.csv\" INTO Restaurantes\nWITH MAPPING (ubicacion = ARRAY(latitud, longitud));\n\nSELECT * FROM Restaurantes\nWHERE ubicacion NEAREST ((40.758, -73.9855), 10);",
+  "last_results": [
+    {
+      "plan": "CreateTablePlan",
+      "result": {
+        "data": "OK: tabla Restaurantes creada (primario=BTREE, key=id)",
+        "disk_reads": 0,
+        "disk_writes": 0,
+        "execution_time_ms": 0,
+        "rebuild_triggered": false,
+        "operation_breakdown": {}
+      }
+    },
+    {
+      "plan": "LoadDataPlan",
+      "result": {
+        "data": "CSV cargado: insertados=200, duplicados=0, cast_err=0",
+        "disk_reads": 1482,
+        "disk_writes": 1151,
+        "execution_time_ms": 20093.716144561768,
+        "rebuild_triggered": false,
+        "operation_breakdown": {}
+      }
+    },
+    {
+      "plan": "SelectPlan",
+      "result": {
+        "data": [
+          {
+            "id": 74,
+            "nombre": "La Toscana                                                                                          ",
+            "ubicacion": [
+              -24.78333282470703,
+              -65.41500091552734
+            ],
+            "rating": 4.599999904632568,
+            "fecha_apertura": "2013-09-12"
+          },
+          {
+            "id": 78,
+            "nombre": "Thai Express                                                                                        ",
+            "ubicacion": [
+              -24.78416633605957,
+              -65.41416931152344
+            ],
+            "rating": 4.400000095367432,
+            "fecha_apertura": "2016-01-07"
+          },
+          {
+            "id": 86,
+            "nombre": "Organic Garden                                                                                      ",
+            "ubicacion": [
+              -24.78472137451172,
+              -65.41527557373047
+            ],
+            "rating": 4.199999809265137,
+            "fecha_apertura": "2019-05-06"
+          },
+          {
+            "id": 72,
+            "nombre": "Sakura Sushi                                                                                        ",
+            "ubicacion": [
+              -24.78499984741211,
+              -65.413330078125
+            ],
+            "rating": 4.0,
+            "fecha_apertura": "2018-02-16"
+          },
+          {
+            "id": 82,
+            "nombre": "Masala India                                                                                        ",
+            "ubicacion": [
+              -24.785554885864258,
+              -65.41278076171875
+            ],
+            "rating": 4.5,
+            "fecha_apertura": "2015-11-25"
+          },
+          {
+            "id": 90,
+            "nombre": "Océano Azul                                                                                        ",
+            "ubicacion": [
+              -24.78583335876465,
+              -65.41444396972656
+            ],
+            "rating": 4.699999809265137,
+            "fecha_apertura": "2014-08-24"
+          },
+          {
+            "id": 84,
+            "nombre": "El Mediterráneo                                                                                    ",
+            "ubicacion": [
+              -24.78611183166504,
+              -65.41388702392578
+            ],
+            "rating": 4.800000190734863,
+            "fecha_apertura": "2013-07-14"
+          },
+          {
+            "id": 76,
+            "nombre": "Frutos del Mar                                                                                      ",
+            "ubicacion": [
+              -24.786666870117188,
+              -65.41166687011719
+            ],
+            "rating": 4.300000190734863,
+            "fecha_apertura": "2015-04-18"
+          },
+          {
+            "id": 88,
+            "nombre": "Sushi Master                                                                                        ",
+            "ubicacion": [
+              -24.787221908569336,
+              -65.41138458251953
+            ],
+            "rating": 3.700000047683716,
+            "fecha_apertura": "2021-01-30"
+          },
+          {
+            "id": 80,
+            "nombre": "Pasta Bella                                                                                         ",
+            "ubicacion": [
+              -24.787500381469727,
+              -65.41083526611328
+            ],
+            "rating": 4.099999904632568,
+            "fecha_apertura": "2014-03-28"
+          }
+        ],
+        "disk_reads": 21,
+        "disk_writes": 0,
+        "execution_time_ms": 38.39898109436035,
+        "rebuild_triggered": false,
+        "operation_breakdown": {
+          "primary_metrics": {
+            "reads": 20,
+            "writes": 0,
+            "time_ms": 21.877765655517578
+          },
+          "secondary_metrics": {
+            "reads": 1,
+            "writes": 0,
+            "time_ms": 16.521215438842773
+          }
+        }
+      }
+    }
+  ],
+  "last_tables": [
+    "Restaurantes"
+  ]
+}

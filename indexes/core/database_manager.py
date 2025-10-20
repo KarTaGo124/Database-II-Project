@@ -710,14 +710,36 @@ class DatabaseManager:
         table_info = self.tables[table_name]
         removed_files = []
 
+        # Cerrar y eliminar índices secundarios
         for field_name, index_info in table_info["secondary_indexes"].items():
             secondary_index = index_info["index"]
+            # Cerrar primero si es posible
+            if hasattr(secondary_index, 'close'):
+                try:
+                    secondary_index.close()
+                except Exception:
+                    pass
+            # Eliminar referencia del diccionario
+            index_info["index"] = None
+            # Luego eliminar archivos
             if hasattr(secondary_index, 'drop_index'):
                 removed_files.extend(secondary_index.drop_index())
 
+        # Cerrar y eliminar índice primario
         primary_index = table_info["primary_index"]
+        if hasattr(primary_index, 'close'):
+            try:
+                primary_index.close()
+            except Exception:
+                pass
+        # Eliminar referencia
+        table_info["primary_index"] = None
         if hasattr(primary_index, 'drop_table'):
             removed_files.extend(primary_index.drop_table())
+
+        # Forzar recolección de basura para liberar referencias
+        import gc
+        gc.collect()
 
         del self.tables[table_name]
         return removed_files
