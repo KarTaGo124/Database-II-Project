@@ -1,0 +1,2 @@
+Configuration,Records,Data_Load_Reads,Data_Load_Writes,Data_Load_Time_ms,Index_Creation_Reads,Index_Creation_Writes,Index_Creation_Time_ms,Total_Insertion_Reads,Total_Insertion_Writes,Total_Insertion_Time_ms
+R-Tree Spatial Index,"CSV cargado: insertados=21225, duplicados=0, cast_err=27670",65107,27543,228583.58931541443,886,21192,1915.2016639709473,65993,48735,230498.79097938538
