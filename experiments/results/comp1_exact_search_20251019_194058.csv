@@ -1,0 +1,4 @@
+Index_Type,Avg_Reads,Avg_Time_ms,Avg_Results,Samples
+Sequential,16.4,1.982259750366211,0.9,10
+ISAM,3.0,0.42197704315185547,0.9,10
+B+Tree Clustered,3.0,0.6401538848876953,0.9,10

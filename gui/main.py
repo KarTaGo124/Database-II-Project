@@ -19,9 +19,9 @@ from indexes.core.database_manager import DatabaseManager
 
 
 # ======================= Configuración =======================
-STATE_DIR = _ROOT / "data" / "gui_state"
+STATE_DIR = _ROOT / "gui" / "data" / "gui_state"
 STATE_FILE = STATE_DIR / "state.json"
-DB_BASE_DIR = _ROOT / "data" / "databases"
+DB_BASE_DIR = _ROOT / "gui" / "data" / "databases"
 
 # ======================= CSS Personalizado =======================
 def load_custom_css():
@@ -351,8 +351,7 @@ def render_query_documentation():
             - `RTREE` - Solo secundario (para datos espaciales ARRAY)
             """)
             
-            st.code("""-- Ejemplo: Tabla de restaurantes con índices
-CREATE TABLE Restaurantes (
+            st.code("""CREATE TABLE Restaurantes (
     id INT KEY INDEX BTREE,
     nombre VARCHAR[100] INDEX BTREE,
     ubicacion ARRAY[FLOAT] INDEX RTREE,
@@ -384,8 +383,7 @@ CREATE TABLE Restaurantes (
             - Para campos ARRAY, usa WITH MAPPING para especificar qué columnas del CSV corresponden a cada dimensión
             """)
             
-            st.code("""-- Ejemplo: Cargar restaurantes con coordenadas
-LOAD DATA FROM FILE "../data/datasets/restaurantes.csv" INTO Restaurantes
+            st.code("""LOAD DATA FROM FILE "data/datasets/restaurantes.csv" INTO Restaurantes
 WITH MAPPING (
     ubicacion = ARRAY(latitud, longitud)
 );""", language="sql")
@@ -419,10 +417,8 @@ WITH MAPPING (
             ```
             """)
             
-            st.code("""-- Ver todos los restaurantes
-SELECT * FROM Restaurantes;
+            st.code("""SELECT * FROM Restaurantes;
 
--- Ver solo nombre y rating
 SELECT nombre, rating FROM Restaurantes;""", language="sql")
         
         with st.expander("🎯 SELECT con filtro de igualdad (WHERE =)"):
@@ -439,13 +435,10 @@ SELECT nombre, rating FROM Restaurantes;""", language="sql")
             - Sin índice, realiza escaneo completo O(n)
             """)
             
-            st.code("""-- Buscar por ID (clave primaria, muy rápido)
-SELECT * FROM Restaurantes WHERE id = 42;
+            st.code("""SELECT * FROM Restaurantes WHERE id = 42;
 
--- Buscar por nombre (si tiene índice BTREE)
-SELECT * FROM Restaurantes WHERE nombre = 'La Buena Mesa';
+SELECT * FROM Restaurantes WHERE nombre = "La Buena Mesa";
 
--- Buscar por rating
 SELECT * FROM Restaurantes WHERE rating = 4.5;""", language="sql")
         
         with st.expander("📊 SELECT con rango (BETWEEN)"):
@@ -465,17 +458,14 @@ SELECT * FROM Restaurantes WHERE rating = 4.5;""", language="sql")
             **Nota:** BETWEEN es inclusivo en ambos extremos: [min, max]
             """)
             
-            st.code("""-- Restaurantes con rating entre 4.0 y 5.0
-SELECT * FROM Restaurantes 
+            st.code("""SELECT * FROM Restaurantes
 WHERE rating BETWEEN 4.0 AND 5.0;
 
--- Restaurantes por rango de IDs
-SELECT * FROM Restaurantes 
+SELECT * FROM Restaurantes
 WHERE id BETWEEN 100 AND 200;
 
--- Fechas de apertura en 2023
-SELECT * FROM Restaurantes 
-WHERE fecha_apertura BETWEEN '2023-01-01' AND '2023-12-31';""", language="sql")
+SELECT * FROM Restaurantes
+WHERE fecha_apertura BETWEEN "2023-01-01" AND "2023-12-31";""", language="sql")
     
     # Tab 3: Inserción
     with tabs[2]:
@@ -501,19 +491,17 @@ WHERE fecha_apertura BETWEEN '2023-01-01' AND '2023-12-31';""", language="sql")
             - Si el registro ya existe (clave duplicada), la inserción falla
             """)
             
-            st.code("""-- Insertar con todos los campos
-INSERT INTO Restaurantes VALUES (
+            st.code("""INSERT INTO Restaurantes VALUES (
     1001,
-    'Nuevo Restaurante',
+    "Nuevo Restaurante",
     (-12.0464, -77.0428),
     4.5,
     50.0,
-    '2024-01-15'
+    "2024-01-15"
 );
 
--- Insertar solo campos específicos
-INSERT INTO Restaurantes (id, nombre, ubicacion, rating) 
-VALUES (1002, 'Café Central', (-12.0500, -77.0400), 4.2);""", language="sql")
+INSERT INTO Restaurantes (id, nombre, ubicacion, rating)
+VALUES (1002, "Café Central", (-12.0500, -77.0400), 4.2);""", language="sql")
     
     # Tab 4: Eliminación
     with tabs[3]:
@@ -540,18 +528,14 @@ VALUES (1002, 'Café Central', (-12.0500, -77.0400), 4.2);""", language="sql")
             ⚠️ **Advertencia:** Sin WHERE, eliminaría todos los registros (actualmente no soportado por seguridad)
             """)
             
-            st.code("""-- Eliminar por ID
-DELETE FROM Restaurantes WHERE id = 1001;
+            st.code("""DELETE FROM Restaurantes WHERE id = 1001;
 
--- Eliminar por nombre
-DELETE FROM Restaurantes WHERE nombre = 'Café Viejo';
+DELETE FROM Restaurantes WHERE nombre = "Café Viejo";
 
--- Eliminar rango de registros
 DELETE FROM Restaurantes WHERE rating BETWEEN 0.0 AND 2.0;
 
--- Eliminar por rango de fechas
-DELETE FROM Restaurantes 
-WHERE fecha_apertura BETWEEN '2020-01-01' AND '2020-12-31';""", language="sql")
+DELETE FROM Restaurantes
+WHERE fecha_apertura BETWEEN "2020-01-01" AND "2020-12-31";""", language="sql")
     
     # Tab 5: Índices
     with tabs[4]:
@@ -582,13 +566,10 @@ WHERE fecha_apertura BETWEEN '2020-01-01' AND '2020-12-31';""", language="sql")
             - Las operaciones futuras mantienen el índice actualizado
             """)
             
-            st.code("""-- Índice BTREE para búsquedas por nombre y rangos
-CREATE INDEX ON Restaurantes (nombre) USING BTREE;
+            st.code("""CREATE INDEX ON Restaurantes (nombre) USING BTREE;
 
--- Índice HASH para búsquedas exactas rápidas por rating
 CREATE INDEX ON Restaurantes (rating) USING HASH;
 
--- Índice RTREE para consultas espaciales
 CREATE INDEX ON Restaurantes (ubicacion) USING RTREE;""", language="sql")
         
         with st.expander("🗑️ DROP INDEX - Eliminar Índice"):
@@ -606,10 +587,8 @@ CREATE INDEX ON Restaurantes (ubicacion) USING RTREE;""", language="sql")
             - Las consultas seguirán funcionando pero más lentas
             """)
             
-            st.code("""-- Eliminar índice del campo 'nombre'
-DROP INDEX nombre;
+            st.code("""DROP INDEX nombre;
 
--- Eliminar índice del campo 'ubicacion'
 DROP INDEX ubicacion;""", language="sql")
     
     # Tab 6: Consultas Espaciales
@@ -631,15 +610,14 @@ DROP INDEX ubicacion;""", language="sql")
             st.markdown("""
             Encuentra todos los puntos dentro de un radio desde un punto central.
             
-            **Sintaxis correcta:**
+            **Sintaxis:**
             ```sql
-            SELECT * FROM tabla 
+            SELECT * FROM tabla
             WHERE campo_espacial IN ((x, y), radio);
             ```
-            
-            **IMPORTANTE:** 
-            - Usa **doble paréntesis** para las coordenadas: `((x, y), radio)`
-            - La palabra clave es `IN`, seguida de las coordenadas y el radio
+
+            **IMPORTANTE:**
+            - Usa **doble paréntesis**: `IN ((x, y), radio)`
             - El radio está en las **mismas unidades que las coordenadas** (grados para lat/lon)
             
             **Parámetros:**
@@ -658,17 +636,14 @@ DROP INDEX ubicacion;""", language="sql")
             - Sin índice: O(n) escaneo completo
             """)
             
-            st.code("""-- Restaurantes en radio de 0.01 grados (~1.1km)
-SELECT * FROM Restaurantes 
-WHERE ubicacion IN ((-12.0464, -77.0428), 0.01);
+            st.code("""SELECT * FROM Restaurantes
+WHERE ubicacion IN ((40.7614, -73.9776), 0.01);
 
--- Búsqueda más amplia (0.05 grados ≈ 5.5km)
-SELECT nombre, ubicacion, rating FROM Restaurantes 
-WHERE ubicacion IN ((-12.0464, -77.0428), 0.05);
+SELECT nombre, ubicacion, rating FROM Restaurantes
+WHERE ubicacion IN ((40.7614, -73.9776), 0.05);
 
--- Radio pequeño (0.005 ≈ 550m)
-SELECT * FROM Restaurantes 
-WHERE ubicacion IN ((-12.0464, -77.0428), 0.005);""", language="sql")
+SELECT * FROM Restaurantes
+WHERE ubicacion IN ((40.7614, -73.9776), 0.005);""", language="sql")
         
         with st.expander("🏆 K Vecinos Más Cercanos (NEAREST K)", expanded=True):
             st.markdown("""
@@ -676,13 +651,16 @@ WHERE ubicacion IN ((-12.0464, -77.0428), 0.005);""", language="sql")
             
             **Sintaxis:**
             ```sql
-            SELECT * FROM tabla 
-            WHERE campo_espacial NEAREST (x, y) K numero;
+            SELECT * FROM tabla
+            WHERE campo_espacial NEAREST ((x, y), k);
             ```
-            
+
+            **IMPORTANTE:**
+            - Usa **doble paréntesis**: `NEAREST ((x, y), k)`
+
             **Parámetros:**
             - `(x, y)`: Coordenadas del punto de referencia
-            - `K`: Número de vecinos más cercanos a retornar
+            - `k`: Número de vecinos más cercanos a retornar
             
             **Características:**
             - Retorna exactamente K resultados (o menos si no hay suficientes)
@@ -695,29 +673,26 @@ WHERE ubicacion IN ((-12.0464, -77.0428), 0.005);""", language="sql")
             - Sistemas de recomendación geográfica
             """)
             
-            st.code("""-- Los 5 restaurantes más cercanos a una ubicación
-SELECT nombre, ubicacion, rating FROM Restaurantes 
-WHERE ubicacion NEAREST (-12.0464, -77.0428) K 5;
+            st.code("""SELECT nombre, ubicacion, rating FROM Restaurantes
+WHERE ubicacion NEAREST ((40.758, -73.9855), 5);
 
--- Los 3 mejor valorados y más cercanos (combinar con filtros)
-SELECT * FROM Restaurantes 
-WHERE ubicacion NEAREST (-12.0500, -77.0400) K 3;
+SELECT * FROM Restaurantes
+WHERE ubicacion NEAREST ((40.758, -73.9855), 3);
 
--- Top 10 más cercanos
-SELECT id, nombre, ubicacion FROM Restaurantes 
-WHERE ubicacion NEAREST (-12.0464, -77.0428) K 10;""", language="sql")
+SELECT id, nombre, ubicacion FROM Restaurantes
+WHERE ubicacion NEAREST ((40.758, -73.9855), 10);""", language="sql")
         
         st.info("""
         💡 **Consejos para consultas espaciales con R-Tree:**
-        
-        - **Sintaxis especial:** Usa doble paréntesis para coordenadas en consultas espaciales
+
+        - **Sintaxis especial:** Usa doble paréntesis: `IN ((x, y), radio)` y `NEAREST ((x, y), k)`
         - **Unidades:** Para GPS (lat/lon), el radio está en grados decimales:
           - 0.001° ≈ 111 metros
-          - 0.01° ≈ 1.1 kilómetros  
+          - 0.01° ≈ 1.1 kilómetros
           - 0.05° ≈ 5.5 kilómetros
           - 0.1° ≈ 11 kilómetros
         - **Índice requerido:** Crea un índice RTREE en campos ARRAY[FLOAT] para mejor rendimiento
-        - **Formato de coordenadas:** (latitud, longitud) - ejemplo: (-12.0464, -77.0428)
+        - **Formato de coordenadas:** (latitud, longitud) - ejemplo: (40.758, -73.9855)
         """)
 
 
@@ -768,7 +743,7 @@ def execute_sql_block(sql_text: str) -> List[Dict[str, Any]]:
         except Exception as e:
             error_msg = str(e)
             if "does not exist" in error_msg.lower():
-                error_msg = f"❌ {error_msg}\n\n💡 Tip: Tras F5, las tablas en memoria se pierden. Ejecuta LIMPIAR BD + CREATE TABLE + LOAD DATA de nuevo."
+                error_msg = f"❌ {error_msg}\n\n💡 Tip: Ejecuta CREATE TABLE + LOAD DATA primero."
             results.append({"plan": plan_name, "error": error_msg})
         finally:
             progress.progress(i / total, text=f"Ejecutando… {i}/{total}")
@@ -929,11 +904,7 @@ def main():
     with tab_editor:
         st.subheader("📝 Editor de Consultas")
         
-        default_sql = """-- Sistema de Gestión de Base de Datos
--- Soporta múltiples tipos de índices y consultas espaciales
-
--- 1. Crear tabla con índices
-CREATE TABLE Restaurantes (
+        default_sql = """CREATE TABLE Restaurantes (
     id INT KEY INDEX BTREE,
     nombre VARCHAR[100] INDEX BTREE,
     ubicacion ARRAY[FLOAT] INDEX RTREE,
@@ -941,17 +912,19 @@ CREATE TABLE Restaurantes (
     fecha_apertura DATE
 );
 
--- 2. Cargar datos desde CSV
-LOAD DATA FROM FILE "../data/datasets/restaurantes.csv" INTO Restaurantes
+LOAD DATA FROM FILE "data/datasets/restaurantes.csv" INTO Restaurantes
 WITH MAPPING (ubicacion = ARRAY(latitud, longitud));
 
--- 3. Consulta espacial: 10 vecinos más cercanos
-SELECT * FROM Restaurantes 
-WHERE ubicacion NEAREST ((-12.0464, -77.0428), 10);"""
-        
+SELECT * FROM Restaurantes
+WHERE ubicacion NEAREST ((40.758, -73.9855), 10);"""
+
+        # Mantener el SQL default si no hay last_sql guardado
+        if "last_sql" not in st.session_state or not st.session_state["last_sql"]:
+            st.session_state["last_sql"] = default_sql
+
         sql_text = st.text_area(
             "Escribe tus consultas SQL (separadas por `;`)",
-            value=st.session_state.get("last_sql", default_sql),
+            value=st.session_state["last_sql"],
             height=350,
             key="sql_editor",
             help="Escribe múltiples sentencias SQL separadas por punto y coma"
@@ -981,16 +954,28 @@ WHERE ubicacion NEAREST ((-12.0464, -77.0428), 10);"""
             )
         
         if clear_btn:
-            db_dir = _ROOT / "data" / "databases"
+            db_dir = DB_BASE_DIR
             try:
+                # Primero cerrar todas las tablas e índices
+                if "db" in st.session_state:
+                    db = st.session_state.db
+                    for table_name in list(db.tables.keys()):
+                        try:
+                            db.drop_table(table_name)
+                        except Exception:
+                            pass
+
+                # Resetear servicios
+                _reset_services()
+
+                # Ahora borrar archivos
                 if db_dir.exists():
                     shutil.rmtree(db_dir)
                 db_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 if STATE_FILE.exists():
                     STATE_FILE.unlink()
-                
-                _reset_services()
+
                 st.success("✅ Base de datos limpiada exitosamente")
                 st.rerun()
             except Exception as e:
@@ -1012,7 +997,7 @@ WHERE ubicacion NEAREST ((-12.0464, -77.0428), 10);"""
         st.info("""
         📌 **Instrucciones:**
         1. Sube tu archivo CSV usando el botón de abajo
-        2. El archivo se guardará en `data/datasets/_uploads/`
+        2. El archivo se guardará en `gui/data/datasets/`
         3. Usa la sentencia LOAD DATA en el editor SQL para importarlo
         """)
         
@@ -1024,7 +1009,7 @@ WHERE ubicacion NEAREST ((-12.0464, -77.0428), 10);"""
         )
         
         if uploaded:
-            upload_dir = _ROOT / "data" / "datasets" / "_uploads"
+            upload_dir = _ROOT / "gui" / "data" / "datasets"
             upload_dir.mkdir(parents=True, exist_ok=True)
             dst = upload_dir / uploaded.name
             

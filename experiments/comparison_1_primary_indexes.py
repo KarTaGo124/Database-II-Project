@@ -2,7 +2,7 @@
 COMPARISON 1: Primary Indexes Performance
 ==========================================
 Compares: Sequential vs ISAM vs B+Tree Clustered
-Dataset: World Cities (10k records by default, change to worldcities.csv for full 10k)
+Dataset: World Cities
 Operations: Insert, Search by id, Range Search by id
 """
 
@@ -62,7 +62,7 @@ def test_primary_index(index_type, index_name):
     # LOAD DATA using SQL
     print(f"\n--- Loading data from CSV ---")
     load_sql = """
-    LOAD DATA FROM FILE "data/datasets/worldcities_10k.csv"
+    LOAD DATA FROM FILE "data/datasets/worldcities.csv"
     INTO cities
     """
 
@@ -96,7 +96,7 @@ def test_primary_index(index_type, index_name):
     print(f"\n--- Search Tests ---")
 
     # Test 1: Exact search by id
-    test_ids = [1392685764, 1356226629, 1124616052]  # Tokyo, New York, London
+    test_ids = [1392685764, 1356226629, 1124616052, 1096999548, 1624958412, 1608693683, 1484666646, 1360051337, 1156029196, 1304206491] 
     search_reads = []
     search_times = []
     search_counts = []
@@ -123,7 +123,6 @@ def test_primary_index(index_type, index_name):
         'samples': len(test_ids)
     }
 
-    print(search_times)
     print(f"  Exact Search (avg of {len(test_ids)} queries):")
     print(f"    Avg Reads: {results['search']['avg_reads']:.2f}")
     print(f"    Avg Time: {results['search']['avg_time_ms']:.2f}ms")
@@ -133,7 +132,9 @@ def test_primary_index(index_type, index_name):
     range_searches = [
         (1000000000, 1100000000),
         (1200000000, 1800000000),
-        (1400000000, 1600000000)
+        (1400000000, 1600000000),
+        (1500000000, 1700000000),
+        (1300000000, 1900000000)
     ]
     range_reads = []
     range_times = []
@@ -161,7 +162,6 @@ def test_primary_index(index_type, index_name):
         'samples': len(range_searches)
     }
 
-    print(range_times)
     print(f"  Range Search (avg of {len(range_searches)} queries):")
     print(f"    Avg Reads: {results['range_search']['avg_reads']:.2f}")
     print(f"    Avg Time: {results['range_search']['avg_time_ms']:.2f}ms")
@@ -173,7 +173,7 @@ def main():
     print("\n" + "="*70)
     print("COMPARISON 1: PRIMARY INDEXES PERFORMANCE")
     print("="*70)
-    print("Dataset: World Cities (10k records)")
+    print("Dataset: World Cities")
     print("Comparing: Sequential vs ISAM vs B+Tree Clustered")
     print("Using SQL Parser & Executor")
     print("="*70)
